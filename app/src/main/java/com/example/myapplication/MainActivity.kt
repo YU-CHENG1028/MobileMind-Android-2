@@ -1,19 +1,22 @@
 package com.example.myapplication
 
-import android.content.Context.INPUT_METHOD_SERVICE
+//import android.content.Context.INPUT_METHOD_SERVICE
+//import android.R.attr.data
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+//import android.util.Log.e
+//import android.util.Log.e
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat.getSystemService
-import androidx.core.content.ContextCompat.startForegroundService
+//import androidx.core.content.ContextCompat.getSystemService
+//import androidx.core.content.ContextCompat.startForegroundService
 import com.example.myapplication.databinding.ActivityMainBinding
 import com.google.gson.Gson
 //import retrofit2.Call
@@ -26,7 +29,7 @@ import okhttp3.*
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okio.ByteString
+//import okio.ByteString
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
@@ -184,7 +187,7 @@ class MainActivity : AppCompatActivity() {
     private fun connectToWebSocket() {
         val request = Request.Builder()
         //Ngrok 隨機網址，且路由結尾為 /ws
-            .url("wss://much-glisten-educator.ngrok-free.dev/ws")
+            .url("wss://unannealed-controllingly-sarai.ngrok-free.dev/ws")
         //注入 Header 繞過 Ngrok 免費版的 200 OK 網頁攔截，確保 101 握手成功
             .addHeader("ngrok-skip-browser-warning", "true")
             .build()
@@ -194,10 +197,10 @@ class MainActivity : AppCompatActivity() {
                 // 連線成功！
                 this@MainActivity.webSocket = webSocket
                 runOnUiThread { showResult("WebSocket 已連線成功") }
-                // 初始化: 發送 first_messages，喚醒後端的 LangGraph 大腦
+                // 初始化: 發送 Initial_messages，喚醒後端的 LangGraph 大腦
                 try {
                     val initMsg = org.json.JSONObject()
-                    initMsg.put("first_messages", "Hello MobileMind")
+                    initMsg.put("Initial_messages", "Hello MobileMind")
                     webSocket.send(initMsg.toString())
                     Log.d("WebSocket", "已成功發送訊號，啟動後端 Agent")
                 } catch (e: Exception) {
@@ -206,19 +209,133 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                // 收到 Python 後端傳來的指令或回覆 ，text 就是後端傳回來的 JSON 字串，需手動解析
                 try {
-                    // 解析符合後端格式 (source, message, timestamp) 的資料
-                    val responseData = Gson().fromJson(text, MyResponseData::class.java)
+                    val jsonForType = JSONObject(text)
+                    val type = jsonForType.optString("type", "unknown")
 
-                    // 安全切換回主執行緒更新介面，顯示後端的 message 內容
-                    runOnUiThread {
-                        showResult("AI 回應 [${responseData.source}]: ${responseData.message}")
+                    when (type) {
+                        "initial_message" -> {
+                            val data = Gson().fromJson(text, InitialMessage::class.java)
+                            runOnUiThread { showResult("【系統連線】${data.message}") }
+                        }
+                        "ask_user" -> {
+                            // 💡 對齊 AskUserMessage
+                            val data = Gson().fromJson(text, AskUserMessage::class.java)
+                            handleAskUser(data)
+                        }
+                        "task_start" -> {
+                            // 💡 修正對齊 TaskStartMessage
+                            val data = Gson().fromJson(text, TaskStartMessage::class.java)
+                            handleTaskStart(data)
+                        }
+                        "read_ui" -> {
+                            // 💡 修正對齊 ReadUiMessage
+                            val data = Gson().fromJson(text, ReadUiMessage::class.java)
+                            handleReadUI(data)
+                        }
+                        "action_check" -> {
+                            // 💡 修正對齊 ActionCheckMessage
+                            val data = Gson().fromJson(text, ActionCheckMessage::class.java)
+                            handleActionCheck(data)
+                        }
+                        "operate_command" -> {
+                            // 💡 修正對齊 OperateCommandMessage
+                            val data = Gson().fromJson(text, OperateCommandMessage::class.java)
+                            handleOperateCommand(data)
+                        }
+                        "task_end" -> {
+                            // 💡 修正對齊 TaskEndMessage
+                            val data = Gson().fromJson(text, TaskEndMessage::class.java)
+                            handleTaskEnd(data)
+                        }
+                        else -> Log.w("WebSocket", "收到未定義的型態: $type")
                     }
                 } catch (e: Exception) {
-                    Log.e("WebSocket", "JSON 解析失敗: ${e.message}，原始文字: $text")
+                    Log.e("WebSocket", "解析失敗: ${e.message}")
                 }
             }
+
+            //將後端詢問使用者的必要問題顯示在APP上，並將使用者所說的細節(detail_response)傳給後端。
+            // 1. 負責接收並呈現畫面的 Handler
+            private fun handleAskUser(data: AskUserMessage) {
+                try {
+                    val askMessages = data.askMessages
+
+                    runOnUiThread {
+                        // 讓畫面上顯示 AI 的問題
+                        showResult("AI 提問: $askMessages")
+
+                        // 💡 關鍵：在這個時候，把傳送按鈕的點擊事件準備好！
+                        binding.btnVoice.setOnClickListener {
+                            val userInput = binding.etCommand.text.toString().trim()
+                            if (userInput.isNotEmpty()) {
+                                // 呼叫發送函式，把內容傳回給後端
+                                sendDetailResponse(userInput)
+
+                                // 清空輸入框
+                                binding.etCommand.text.clear()
+                            } else {
+                                // 如果沒打字，彈出小提示（這裡要記得傳入 Activity 的 context，用 this@MainActivity 最安全）
+                                android.widget.Toast.makeText(this@MainActivity, "請輸入回覆內容", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("WebSocket", "handleAskUser 解析失敗: ${e.message}")
+                }
+            }
+
+            // 2. 負責把打包好的 JSON 丟回後端的函式（宣告為 private 獨立函式即可）
+            private fun sendDetailResponse(userResponse: String) {
+                if (webSocket != null) {
+                    try {
+                        val currentTime = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault()).format(java.util.Date())
+
+                        // 實例化 PythonModel.kt 裡的發送模型
+                        val payload = DetailResponsePayload(
+                            detailResponse = userResponse,
+                            sentTime = currentTime
+                        )
+
+                        // 直接用 Gson 序列化為純文字，發送出去！
+                        webSocket.send(Gson().toJson(payload))
+                        Log.d("WebSocket", "已發送細節回應: $userResponse")
+
+                        runOnUiThread { showResult("我: $userResponse") }
+                    } catch (e: Exception) {
+                        Log.e("WebSocket", "發送失敗: ${e.message}")
+                    }
+                }
+            }
+
+
+
+            //通知APP任務開始(背景、通知、常駐)(顯示: 任務執行中...)任務初始化
+            private fun handleTaskStart(data: TaskStartMessage){
+                runOnUiThread { showResult("系統通知: 任務已開始。")}
+            }
+
+            private fun handleReadUI(data: ReadUiMessage){
+                runOnUiThread { showResult("系統通知: 後端大腦要求讀取當前螢幕 UI Tree...") }
+            }
+
+            private fun handleActionCheck(data: ActionCheckMessage){
+                val detail = data.actionDetail
+                val reason = data.sensitiveReason
+                runOnUiThread { showResult("敏感操作確認: $detail (原因: $reason)") }
+            }
+
+            private fun handleOperateCommand(data: OperateCommandMessage){
+                val actionStr = data.currentAction
+                runOnUiThread { showResult("AI 執行指令: $actionStr") }
+            }
+
+            private fun handleTaskEnd(data: TaskEndMessage){
+                val result = data.taskResult
+                val process = data.taskProcess
+                runOnUiThread { showResult("🏁 任務結束！結果: $result (流程步數: $process)") }
+            }
+
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 // 連線失敗或中斷[cite: 1]
@@ -229,31 +346,45 @@ class MainActivity : AppCompatActivity() {
         client.newWebSocket(request, listener)
     }
     private fun sendAction(messages: String) {
-        if (::webSocket.isInitialized){
-        //多輪對話物件
-        val request = MyRequestData(prompt = messages, screenshot = null)
-        // 手動轉成 JSON 字串
-        val jsonString = Gson().toJson(request)
-        // 透過長連接送出
-        webSocket.send(jsonString)
-            Log.d("WebSocket", "已發送多輪對話訊息: $jsonString")
-        }
-        else {
-            Toast.makeText(this, "WebSocket 尚未連線，無法發送", Toast.LENGTH_SHORT).show()
+        // 檢查 WebSocket 是否初始化且連線
+        if (webSocket != null) {
+            try {
+                val currentTime = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault()).format(java.util.Date())
+
+                // 💡 直接使用簡潔、無痛的 JSONObject 打包發送，避開 MyRequestData 找不到的問題！
+                val replyJson = JSONObject()
+                replyJson.put("type", "first_messages") // 根據你的後端邏輯調整型態名稱
+                replyJson.put("first_messages", messages)
+                replyJson.put("sent_time", currentTime)
+
+                val jsonString = replyJson.toString()
+                webSocket.send(jsonString)
+                Log.d("WebSocket", "已發送初始指令訊息: $jsonString")
+
+            } catch (e: Exception) {
+                Log.e("WebSocket", "發送失敗: ${e.message}")
+            }
+        } else {
+            Toast.makeText(this, "WebSocket 未連線，無法發送", Toast.LENGTH_SHORT).show()
         }
     }
 
 
         // 發送按鈕點擊
         private fun setupClickListeners() {
-            // 如果你 XML 有 btnVoice (在你的架構中它目前是 ImageButton)
+            // 如果在 XML 寫 btnVoice (在你的佈局中它是 ImageButton 傳送圖標)
             binding.btnVoice.setOnClickListener {
-                val userInput = binding.etCommand.text.toString()
-                if (userInput.isNotBlank()) {
-                    processCommand(userInput)
+                val userInput = binding.etCommand.text.toString().trim()
+
+                if (userInput.isNotEmpty()) {
+                    // 💡 呼叫剛剛修好的發送方法，把主動指令推給 Python 大腦
+                    sendAction(userInput)
+
+                    // 顯示在畫面上並清空輸入框
+                    showResult("我 (主動指令): $userInput")
                     binding.etCommand.text.clear()
                 } else {
-                    Toast.makeText(this, "請輸入指令", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "請輸入內容", Toast.LENGTH_SHORT).show()
                 }
             }
         }
