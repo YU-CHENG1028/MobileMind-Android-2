@@ -1,64 +1,109 @@
 package com.example.myapplication
 
-//import android.content.Context.INPUT_METHOD_SERVICE
-//import android.R.attr.data
+//System Services & Intent
+import android.content.Context.INPUT_METHOD_SERVICE
 import android.content.Intent
+import android.content.IntentFilter
+import android.provider.Settings
+import android.view.inputmethod.InputMethodManager
+//MediaProjection
 import android.media.projection.MediaProjectionManager
+//Threading & Logs
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+//Android Jetpack & OS
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.util.Log
-//import android.util.Log.e
-//import android.util.Log.e
-import android.view.inputmethod.InputMethodManager
-import android.widget.Toast
+import android.util.Log.e
+import androidx.annotation.RequiresApi
+//Activity Results
 import androidx.activity.result.contract.ActivityResultContracts
+//UI Elements & ViewBinding
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-//import androidx.core.content.ContextCompat.getSystemService
-//import androidx.core.content.ContextCompat.startForegroundService
+import android.widget.Toast
 import com.example.myapplication.databinding.ActivityMainBinding
+//Data Parsing
 import com.google.gson.Gson
-//import retrofit2.Call
-//import retrofit2.Callback
-//import retrofit2.Response
-//import retrofit2.Retrofit
-//import retrofit2.converter.gson.GsonConverterFactory
-import kotlin.jvm.java
-import okhttp3.*
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-//import okio.ByteString
 import org.json.JSONObject
+//OkHttp / WebSocket
+import okhttp3.*
+
+//import okhttp3.Response
+//import okhttp3.WebSocket
+//import okhttp3.WebSocketListener
 
 class MainActivity : AppCompatActivity() {
-    // 使用 ViewBinding 可以避免 findViewById，程式碼更簡潔且安全
+    // ViewBinding
     private lateinit var binding: ActivityMainBinding
 
-    // 定義 後端 服務
-    //private lateinit var pythonApiService: PythonApiService
-    private lateinit var webSocket: WebSocket
+    //WebSocket(channel)
+    private var webSocket: WebSocket? = null
+
+    //OkHttpClient(factory)
     private val client = OkHttpClient()
 
-
-    // 宣告 MediaProjection 管理器
+    // MediaProjection
     private lateinit var mediaProjectionManager: MediaProjectionManager
-    private val REQUEST_CODE = 1000 // 自定義一個請求代碼
 
-    // 新增：註冊螢幕擷取的回傳處理
+    // screenCaptureLauncher(handleScreenCaptureResult)
     private val screenCaptureLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK && result.data != null) {
-            // 使用者授權後，啟動前台服務進行截圖
-            val serviceIntent = Intent(this, MediaProjectionService::class.java).apply {
-                putExtra("data", result.data)
+        ActivityResultContracts.StartActivityForResult(),
+        ::handleScreenCaptureResult
+    )
+
+    // UiTreeJson(String)
+    private var lastReceivedUiJson: String = "{}"
+    //ScreenShot->Base64(String)
+    private var latestScreenshotBase64: String = ""
+
+    // 2. 螢幕截圖廣播接收器
+    private val screenshotReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action == "COM_MOBILEMIND_SCREENSHOT_READY") {
+                val base64 = intent.getStringExtra("REAL_SCREENSHOT_BASE64")
+                if (!base64.isNullOrEmpty()) {
+                    latestScreenshotBase64 = base64
+                    sendUiScreenData() // 💡 呼叫底下的發送函式
+                }
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
+        }
+    }
+
+    // 3. UI 更新廣播接收器
+    private val uiUpdateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action == "COM_MOBILEMIND_UI_UPDATED") {
+                val json = intent.getStringExtra("UI_JSON")
+                if (!json.isNullOrEmpty()) {
+                    lastReceivedUiJson = json
+                }
+            }
+        }
+    }
+
+
+    // 5. 🚀 核心傳送函式（確保獨立放在 class 內，不要嵌套在其他函式裡）
+    private fun sendUiScreenData() {
+        webSocket?.let { ws ->
+            try {
+                val currentTime = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    java.util.Locale.getDefault()
+                ).format(java.util.Date())
+
+                val payload = UiScreenDataPayload(
+                    uiTree = lastReceivedUiJson,
+                    screenShot = latestScreenshotBase64,
+                    sentTime = currentTime
+                )
+
+                val jsonResponse = Gson().toJson(payload)
+                ws.send(jsonResponse)
+                Log.d("WebSocket", "成功推送到 Python！")
+            } catch (e: Exception) {
+                Log.e("WebSocket", "sendUiScreenData 失敗: ${e.message}")
             }
         }
     }
@@ -127,84 +172,36 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    //Retrofit 需要 BaseURL 與 Converter (JSON 轉物件)
-    /*private fun setupRetrofit() {
-
-        // 後端
-        pythonApiService = Retrofit.Builder()
-            .baseUrl("wss://unannealed-controllingly-sarai.ngrok-free.dev/ws")
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(PythonApiService::class.java)
-
-    }*/
-    //  建立連線方法
-    /*class WebSocketManager {
-        private val client = OkHttpClient()
-        private var webSocket: WebSocket? = null
-
-        fun connect() {
-            val request = Request.Builder()
-                .url("wss://unannealed-controllingly-sarai.ngrok-free.dev/ws")
-                .addHeader("ngrok-skip-browser-warning", "true")  // 重要！跳過 ngrok 警告頁
-                .build()
-
-            webSocket = client.newWebSocket(request, object : WebSocketListener() {
-
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    // 連線成功後，馬上送出第一條訊息（對應你後端的 initial_data）
-                    val initMsg = JSONObject()
-                    initMsg.put("first_messages", "使用者的初始指令")
-                    webSocket.send(initMsg.toString())
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    // 收到後端訊息
-                    val json = JSONObject(text)
-                    println("收到訊息: $json")
-                    // 根據 type 欄位判斷要做什麼
-                }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    println("連線失敗: ${t.message}")
-                }
-
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    println("連線關閉: $reason")
-                }
-            })
-        }
-
-        // 送訊息給後端（對應你的 handle_user_response）
-        fun sendMessage(data: JSONObject) {
-            webSocket?.send(data.toString())
-        }
-
-        fun disconnect() {
-            webSocket?.close(1000, "使用者關閉")
-        }
-    }*/
     private fun connectToWebSocket() {
         val request = Request.Builder()
-        //Ngrok 隨機網址，且路由結尾為 /ws
+            //Ngrok 隨機網址，且路由結尾為 /ws
             .url("wss://unannealed-controllingly-sarai.ngrok-free.dev/ws")
-        //注入 Header 繞過 Ngrok 免費版的 200 OK 網頁攔截，確保 101 握手成功
+            //注入 Header 繞過 Ngrok 免費版的 200 OK 網頁攔截，確保 101 握手成功
             .addHeader("ngrok-skip-browser-warning", "true")
             .build()
         //  "Interface"：透過 Listener 處理所有事件
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // 連線成功！
+                // 1. 立即將連線實例指派給全域變數，確保其他方法隨時可用
                 this@MainActivity.webSocket = webSocket
-                runOnUiThread { showResult("WebSocket 已連線成功") }
-                // 初始化: 發送 Initial_messages，喚醒後端的 LangGraph 大腦
-                try {
-                    val initMsg = org.json.JSONObject()
-                    initMsg.put("Initial_messages", "Hello MobileMind")
-                    webSocket.send(initMsg.toString())
-                    Log.d("WebSocket", "已成功發送訊號，啟動後端 Agent")
-                } catch (e: Exception) {
-                    Log.e("WebSocket", "發送初始訊息失敗: ${e.message}")
+                // 2. 優化：合併回主執行緒處理所有 UI 與權限相關任務
+                runOnUiThread {
+                    try {
+                        showResult("WebSocket 已連線成功")
+                        //  初始化：發送 Initial_messages，喚醒後端的 LangGraph 大腦
+                        val initMsg = org.json.JSONObject().apply {
+                            put("Initial_messages", "Hello MobileMind")
+                        }
+                        webSocket.send(initMsg.toString())
+                        Log.d("WebSocket", "已成功發送訊號，啟動後端 Agent")
+                        // 連線建立的瞬間，立刻在主執行緒發動螢幕截圖授權視窗
+                        val captureIntent = mediaProjectionManager.createScreenCaptureIntent()
+                        screenCaptureLauncher.launch(captureIntent)
+                        Log.d("MobileMind", "連線成功，已主動要求螢幕截圖權限")
+                    } catch (e: Exception) {
+                        Log.e("WebSocket", "發送初始訊息失敗: ${e.message}")
+                        Log.e("MobileMind", "啟動截圖授權失敗: ${e.message}")
+                    }
                 }
             }
 
@@ -218,36 +215,43 @@ class MainActivity : AppCompatActivity() {
                             val data = Gson().fromJson(text, InitialMessage::class.java)
                             runOnUiThread { showResult("【系統連線】${data.message}") }
                         }
+
                         "ask_user" -> {
                             // 💡 對齊 AskUserMessage
                             val data = Gson().fromJson(text, AskUserMessage::class.java)
                             handleAskUser(data)
                         }
+
                         "task_start" -> {
                             // 💡 修正對齊 TaskStartMessage
                             val data = Gson().fromJson(text, TaskStartMessage::class.java)
                             handleTaskStart(data)
                         }
+
                         "read_ui" -> {
                             // 💡 修正對齊 ReadUiMessage
                             val data = Gson().fromJson(text, ReadUiMessage::class.java)
                             handleReadUI(data)
                         }
+
                         "action_check" -> {
                             // 💡 修正對齊 ActionCheckMessage
                             val data = Gson().fromJson(text, ActionCheckMessage::class.java)
                             handleActionCheck(data)
                         }
+
                         "operate_command" -> {
                             // 💡 修正對齊 OperateCommandMessage
                             val data = Gson().fromJson(text, OperateCommandMessage::class.java)
                             handleOperateCommand(data)
                         }
+
                         "task_end" -> {
                             // 💡 修正對齊 TaskEndMessage
                             val data = Gson().fromJson(text, TaskEndMessage::class.java)
                             handleTaskEnd(data)
                         }
+
                         else -> Log.w("WebSocket", "收到未定義的型態: $type")
                     }
                 } catch (e: Exception) {
@@ -276,7 +280,11 @@ class MainActivity : AppCompatActivity() {
                                 binding.etCommand.text.clear()
                             } else {
                                 // 如果沒打字，彈出小提示（這裡要記得傳入 Activity 的 context，用 this@MainActivity 最安全）
-                                android.widget.Toast.makeText(this@MainActivity, "請輸入回覆內容", android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast.makeText(
+                                    this@MainActivity,
+                                    "請輸入回覆內容",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                     }
@@ -289,7 +297,10 @@ class MainActivity : AppCompatActivity() {
             private fun sendDetailResponse(userResponse: String) {
                 if (webSocket != null) {
                     try {
-                        val currentTime = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault()).format(java.util.Date())
+                        val currentTime = java.text.SimpleDateFormat(
+                            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                            java.util.Locale.getDefault()
+                        ).format(java.util.Date())
 
                         // 實例化 PythonModel.kt 裡的發送模型
                         val payload = DetailResponsePayload(
@@ -298,7 +309,7 @@ class MainActivity : AppCompatActivity() {
                         )
 
                         // 直接用 Gson 序列化為純文字，發送出去！
-                        webSocket.send(Gson().toJson(payload))
+                        webSocket?.send(Gson().toJson(payload))
                         Log.d("WebSocket", "已發送細節回應: $userResponse")
 
                         runOnUiThread { showResult("我: $userResponse") }
@@ -309,28 +320,41 @@ class MainActivity : AppCompatActivity() {
             }
 
 
-
             //通知APP任務開始(背景、通知、常駐)(顯示: 任務執行中...)任務初始化
-            private fun handleTaskStart(data: TaskStartMessage){
-                runOnUiThread { showResult("系統通知: 任務已開始。")}
+            private fun handleTaskStart(data: TaskStartMessage) {
+                runOnUiThread { showResult("系統通知: 任務已開始。") }
             }
 
-            private fun handleReadUI(data: ReadUiMessage){
-                runOnUiThread { showResult("系統通知: 後端大腦要求讀取當前螢幕 UI Tree...") }
+            // 4. 🧠 收到 read_ui 時的處置（修正 image_3d6d5f.jpg 第 435 行的錯誤 apply 語法）
+            private fun handleReadUI(data: ReadUiMessage) {
+                runOnUiThread {
+                    showResult("系統通知:AI正在遠端讀取螢幕結構與畫面...")
+                }
+
+                // 💡 修正：用最安全、乾淨的方式指派 ACTION，完全避開類型推導錯誤（Cannot infer type）
+                val captureIntent = Intent(this, MediaProjectionService::class.java)
+                captureIntent.action = "ACTION_CAPTURE"
+                startService(captureIntent)
+
+                val requestUiIntent = Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI")
+                sendBroadcast(requestUiIntent)
+
+                Log.d("WebSocket", "收到 read_ui 指令，命令底層服務準備數據！")
+
             }
 
-            private fun handleActionCheck(data: ActionCheckMessage){
+            private fun handleActionCheck(data: ActionCheckMessage) {
                 val detail = data.actionDetail
                 val reason = data.sensitiveReason
                 runOnUiThread { showResult("敏感操作確認: $detail (原因: $reason)") }
             }
 
-            private fun handleOperateCommand(data: OperateCommandMessage){
+            private fun handleOperateCommand(data: OperateCommandMessage) {
                 val actionStr = data.currentAction
                 runOnUiThread { showResult("AI 執行指令: $actionStr") }
             }
 
-            private fun handleTaskEnd(data: TaskEndMessage){
+            private fun handleTaskEnd(data: TaskEndMessage) {
                 val result = data.taskResult
                 val process = data.taskProcess
                 runOnUiThread { showResult("🏁 任務結束！結果: $result (流程步數: $process)") }
@@ -338,18 +362,25 @@ class MainActivity : AppCompatActivity() {
 
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                super.onFailure(webSocket, t, response)
                 // 連線失敗或中斷[cite: 1]
                 runOnUiThread { showResult("連線失敗: ${t.message}") }
+                // 斷線時將全域連線重設為 null，以利下次重新連線
+                this@MainActivity.webSocket = null
             }
         }
 
         client.newWebSocket(request, listener)
     }
+
     private fun sendAction(messages: String) {
         // 檢查 WebSocket 是否初始化且連線
         if (webSocket != null) {
             try {
-                val currentTime = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault()).format(java.util.Date())
+                val currentTime = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    java.util.Locale.getDefault()
+                ).format(java.util.Date())
 
                 // 💡 直接使用簡潔、無痛的 JSONObject 打包發送，避開 MyRequestData 找不到的問題！
                 val replyJson = JSONObject()
@@ -358,7 +389,7 @@ class MainActivity : AppCompatActivity() {
                 replyJson.put("sent_time", currentTime)
 
                 val jsonString = replyJson.toString()
-                webSocket.send(jsonString)
+                webSocket?.send(jsonString)
                 Log.d("WebSocket", "已發送初始指令訊息: $jsonString")
 
             } catch (e: Exception) {
@@ -370,107 +401,75 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-        // 發送按鈕點擊
-        private fun setupClickListeners() {
-            // 如果在 XML 寫 btnVoice (在你的佈局中它是 ImageButton 傳送圖標)
-            binding.btnVoice.setOnClickListener {
-                val userInput = binding.etCommand.text.toString().trim()
+    // 發送按鈕點擊
+    private fun setupClickListeners() {
+        // 如果在 XML 寫 btnVoice (在你的佈局中它是 ImageButton 傳送圖標)
+        binding.btnVoice.setOnClickListener {
+            val userInput = binding.etCommand.text.toString().trim()
 
-                if (userInput.isNotEmpty()) {
-                    // 💡 呼叫剛剛修好的發送方法，把主動指令推給 Python 大腦
-                    sendAction(userInput)
+            if (userInput.isNotEmpty()) {
+                // 💡 呼叫剛剛修好的發送方法，把主動指令推給 Python 大腦
+                sendAction(userInput)
 
-                    // 顯示在畫面上並清空輸入框
-                    showResult("我 (主動指令): $userInput")
-                    binding.etCommand.text.clear()
-                } else {
-                    Toast.makeText(this, "請輸入內容", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        //      處理最終指令，決定呼叫哪個 AI 大腦
-        private fun processCommand(cmd: String) {
-            // 1. 顯示 Toast 讓使用者知道 App 有在動
-            Toast.makeText(this, "MobileMind 正在連線 Python 後端...", Toast.LENGTH_SHORT).show()
-
-            /* 2. 直接呼叫 Python 對接函數，不再判斷 mode
-            callPython(cmd)*/
-            // 2. 改為呼叫 WebSocket 的發送函數
-            sendAction(cmd)
-
-            //發送完指令後，讓鍵盤自動收起來
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.hideSoftInputFromWindow(binding.etCommand.windowToken, 0)
-        }
-
-        //    注意：404 錯誤通常發生在 ApiService 的 @POST 路徑拼錯，請檢查那邊
-
-        /*private fun callPython(userPrompt: String) {
-            // 1. 準備發送給 Python 的資料
-            val request = MyRequestData(prompt = userPrompt)
-            // 2. 使用 pythonService 發送請求
-            pythonApiService.sendTestData(request).enqueue(object : Callback<MyResponseData> {
-                override fun onResponse(
-                    call: Call<MyResponseData>,
-                    response: Response<MyResponseData>
-                ) {
-                    if (response.isSuccessful) {
-                        val botReply = response.body()?.reply ?: "Python 回傳空值"
-                        showResult(botReply) // 顯示在介面上
-                    } else {
-                        Log.e("DEBUG_STEP", "錯誤碼: ${response.code()}")
-                    }
-                }
-
-                override fun onFailure(call: Call<MyResponseData>, t: Throwable) {
-                    Log.e("DEBUG_STEP", "連線失敗: ${t.message}")
-                }
-            })
-        }*/
-
-        /*統一顯示結果的函數
-        包含 runOnUiThread 確保在非同步請求後安全地更新 UI*/
-//    private fun showResult(message: String) {
-//        runOnUiThread {
-//            // 做法 D：將後端回傳訊息加入 RecyclerView
-//            taskAdapter.addTask(TaskItem(content = "AI 回覆：$message"))
-//
-//            // 原有的 Toast 保留作為偵錯用
-//            Toast.makeText(this@MainActivity, "收到回覆", Toast.LENGTH_SHORT).show()
-//
-//            // 讓列表自動捲動到最上方
-//            binding.rvRecentTasks.scrollToPosition(0)
-//        }
-//    }
-        private fun showResult(message: String) {
-            runOnUiThread {
-                // 1. 將後端回傳的訊息設定給 XML 中的 TextView
-                binding.tvAiResponse.text = message
-
-                // 2. (選配) 如果你希望每次有新回覆時能自動滾動到最上方
-                binding.nestedScrollView.smoothScrollTo(0, 0)
-
-                // 原有的 Toast 可以保留，方便除錯
-                Toast.makeText(this, "已更新回覆", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        // 在 onActivityResult 接收結果
-        override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-            super.onActivityResult(requestCode, resultCode, data) // 資工系好習慣：呼叫父類別方法
-
-            if (requestCode == REQUEST_CODE && resultCode == RESULT_OK) {
-                // 使用者點擊「立即開始」後，啟動你剛才在 Manifest 宣告的前台服務
-                val serviceIntent = Intent(this, MediaProjectionService::class.java)
-                serviceIntent.putExtra("data", data)
-
-                // 根據 Android 版本啟動服務 (Android 8.0+ 建議用 startForegroundService)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
+                // 顯示在畫面上並清空輸入框
+                showResult("我 (主動指令): $userInput")
+                binding.etCommand.text.clear()
+            } else {
+                Toast.makeText(this, "請輸入內容", Toast.LENGTH_SHORT).show()
             }
         }
     }
+
+    //      處理最終指令，決定呼叫哪個 AI 大腦
+    private fun processCommand(cmd: String) {
+        // 1. 顯示 Toast 讓使用者知道 App 有在動
+        Toast.makeText(this, "MobileMind 正在連線 Python 後端...", Toast.LENGTH_SHORT).show()
+
+        /* 2. 直接呼叫 Python 對接函數，不再判斷 mode
+        callPython(cmd)*/
+        // 2. 改為呼叫 WebSocket 的發送函數
+        sendAction(cmd)
+
+        //發送完指令後，讓鍵盤自動收起來
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(binding.etCommand.windowToken, 0)
+    }
+
+    private fun showResult(message: String) {
+        runOnUiThread {
+            // 1. 將後端回傳的訊息設定給 XML 中的 TextView
+            binding.tvAiResponse.text = message
+
+            // 2. (選配) 如果你希望每次有新回覆時能自動滾動到最上方
+            binding.nestedScrollView.smoothScrollTo(0, 0)
+
+            // 原有的 Toast 可以保留，方便除錯
+            Toast.makeText(this, "已更新回覆", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * 🌟 方案 A 獨立出來的成員方法：專門處理螢幕截圖授權結果的回呼
+     * （這段完美的邏輯方法直接取代了舊的 onActivityResult！）
+     */
+    private fun handleScreenCaptureResult(result: androidx.activity.result.ActivityResult) {
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val data: Intent? = result.data
+
+            // 啟動 MediaProjectionService 前台服務
+            val serviceIntent = Intent(this, MediaProjectionService::class.java).apply {
+                putExtra("data", data)
+            }
+
+            // 根據 Android 版本安全啟動服務
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            Log.d("MobileMind", "螢幕截圖授權成功，前台服務已啟動！")
+        } else {
+            Log.w("MobileMind", "使用者拒絕了螢幕截圖授權")
+        }
+    }
+}
