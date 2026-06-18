@@ -1,6 +1,9 @@
 package com.example.myapplication
+//宣告此 Kotlin 類別所屬的套件（Package），Android 專案通常以反向網域名稱命名。
 
-//System Services & Intent
+//**通訊與系統服務(System Services & Intent)**
+
+import android.R.attr.action
 import android.content.Context.INPUT_METHOD_SERVICE
 import android.content.Intent
 import android.content.IntentFilter
@@ -23,6 +26,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import android.widget.Toast
+import androidx.appcompat.resources.Compatibility.Api18Impl.setAutoCancel
 import androidx.core.content.ContextCompat.getSystemService
 import androidx.core.content.ContextCompat.startForegroundService
 import com.example.myapplication.databinding.ActivityMainBinding
@@ -31,6 +35,8 @@ import com.google.gson.Gson
 import org.json.JSONObject
 //OkHttp / WebSocket
 import okhttp3.*
+import kotlin.jvm.java
+
 //import okhttp3.Response
 //import okhttp3.WebSocket
 //import okhttp3.WebSocketListener
@@ -63,6 +69,7 @@ class MainActivity : AppCompatActivity() {
     //ScreenShot->Base64(String)
     private var latestScreenshotBase64: String = ""
 
+
     // 2. 螢幕截圖廣播接收器
     private val screenshotReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
@@ -76,7 +83,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (!base64.isNullOrEmpty()) {
                     latestScreenshotBase64 = base64
-                    sendUiScreenData() // 呼叫底下的發送函式
+                    sendUiScreenData()
                 }
             }
         }
@@ -95,6 +102,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (!json.isNullOrEmpty()) {
                     lastReceivedUiJson = json
+                    sendUiTreeOnly()
                 }
             }
         }
@@ -121,8 +129,8 @@ class MainActivity : AppCompatActivity() {
 
         if (!isAccessibilityServiceEnabled()) {
             AlertDialog.Builder(this)
-                .setTitle("需要開啟無障礙權限")
-                .setMessage("為了讓 MobileMind 提供更完整的自動化服務，請在接下來的頁面找到本應用並開啟服務。")
+                .setTitle("請重新開啟無障礙服務")
+                .setMessage("偵測到無障礙服務已關閉，請手動重新開啟。")
                 .setPositiveButton("前往設定") { _, _ ->
                     // 跳轉至系統無障礙設定頁面
                     val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -155,7 +163,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // 💡 使用 ContextCompat 註冊，它會自動處理跨版本相容，且能完美解開 Lint 錯誤！
         androidx.core.content.ContextCompat.registerReceiver(
             this,
             screenshotReceiver,
@@ -174,24 +181,12 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         // 解除註冊廣播接收器，防記憶體流失
-        unregisterReceiver(screenshotReceiver)
-        unregisterReceiver(uiUpdateReceiver)
-    }
-
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val serviceName = "${packageName}/${MyAccessibilityService::class.java.canonicalName}"
-        val accessibilityEnabled = Settings.Secure.getInt(
-            contentResolver,
-            Settings.Secure.ACCESSIBILITY_ENABLED, 0
-        )
-        if (accessibilityEnabled == 1) {
-            val settingValue = Settings.Secure.getString(
-                contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            )
-            return settingValue?.contains(serviceName) ?: false
+        try {
+            unregisterReceiver(screenshotReceiver)
+            unregisterReceiver(uiUpdateReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.w("MainActivity", "Receiver 未註冊: ${e.message}")
         }
-        return false
     }
 
     // =========================================================
@@ -209,6 +204,7 @@ class MainActivity : AppCompatActivity() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 // 1. 立即將連線實例指派給全域變數，確保其他方法隨時可用
                 this@MainActivity.webSocket = webSocket
+                ConnectionHolder.webSocket = webSocket
                 // 2. 優化：合併回主執行緒處理所有 UI 與權限相關任務
                 runOnUiThread {
                     try {
@@ -294,9 +290,62 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { showResult("連線失敗: ${t.message}") }
                 // 斷線時將全域連線重設為 null，以利下次重新連線
                 this@MainActivity.webSocket = null
+                ConnectionHolder.webSocket = null
             }
         }
         client.newWebSocket(request, listener)
+    }
+
+    // 只送 UiTree 給後端（截圖功能先停用）
+    /*private fun sendUiTreeOnly() {
+        webSocket?.let { ws ->
+            try {
+                val currentTime = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    java.util.Locale.getDefault()
+                ).format(java.util.Date())
+
+                val payload = UiScreenDataPayload(
+                    uiTree = lastReceivedUiJson,
+                    screenShot = "",   // 截圖暫時留空
+                    sentTime = currentTime
+                )
+
+                val jsonResponse = Gson().toJson(payload)
+                ws.send(jsonResponse)
+
+                Log.d("DEBUG_FLOW", "✅ 已發送 UI Tree（無截圖）！總長度: ${jsonResponse.length} 字元")
+            } catch (e: Exception) {
+                Log.e("DEBUG_FLOW", "❌ sendUiTreeOnly 失敗: ${e.message}")
+            }
+        } ?: Log.e("DEBUG_FLOW", "❌ WebSocket 是 null，無法發送！")
+    }*/
+
+    private fun sendUiTreeOnly() {
+        // ✅ 優先用 ConnectionHolder，MainActivity 在背景時仍有效
+        val ws = webSocket ?: ConnectionHolder.webSocket
+
+        ws?.let { activeWs ->
+            try {
+                val currentTime = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    java.util.Locale.getDefault()
+                ).format(java.util.Date())
+
+                val payload = UiScreenDataPayload(
+                    uiTree = lastReceivedUiJson,
+                    screenShot = "",
+                    sentTime = currentTime
+                )
+
+                val jsonResponse = Gson().toJson(payload)
+                activeWs.send(jsonResponse)
+
+                Log.d("DEBUG_FLOW", "✅ 已發送 UI Tree！總長度: ${jsonResponse.length} 字元")
+            } catch (e: Exception) {
+                Log.e("DEBUG_FLOW", "❌ sendUiTreeOnly 失敗: ${e.message}")
+            }
+        } ?: Log.e("DEBUG_FLOW", "❌ WebSocket 是 null（含 ConnectionHolder），無法發送！")
     }
 
     // 5.  核心傳送函式（確保獨立放在 class 內，不要嵌套在其他函式裡）
@@ -342,36 +391,59 @@ class MainActivity : AppCompatActivity() {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE)
                 as android.app.NotificationManager
 
-        // Android 8+ 需要先建立 Channel
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
                 channelId,
                 "MobileMind 任務通知",
                 android.app.NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "顯示 AI 任務執行狀態"
-            }
+            ).apply { description = "顯示 AI 任務執行狀態" }
             notificationManager.createNotificationChannel(channel)
         }
 
-        // 點通知時回到 App
-        val pendingIntent = android.app.PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            android.app.PendingIntent.FLAG_IMMUTABLE
+        // 建立「開始任務」PendingIntent
+        val startIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_TASK_START
+        }
+        val startPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 1, startIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 建立「取消任務」PendingIntent
+        val cancelIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_TASK_CANCEL
+        }
+        val cancelPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 2, cancelIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(R.drawable.ic_launcher_foreground) // 換成你自己的 icon
-            .setContentTitle("MobileMind 任務執行中")
-            .setContentText("AI 正在幫你自動操作，請稍候...")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("MobileMind 任務確認")
+            .setContentText("AI 已準備好，請選擇是否開始執行")
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(false)   // 任務中不讓使用者手動關掉
-            .setOngoing(true)       // 常駐通知
+            .setAutoCancel(false)
+           // .setStyle(androidx.core.app.NotificationCompat.BigTextStyle()
+            //    .bigText("AI 已準備好執行任務，請確認是否開始？"))
+            .addAction(R.drawable.ic_launcher_foreground, "開始任務", startPendingIntent)
+            .addAction(R.drawable.ic_launcher_foreground, "取消任務", cancelPendingIntent)
             .build()
 
-        notificationManager.notify(1001, notification)
+        notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID, notification)
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val services = listOf(
+            "${packageName}/${MyAccessibilityService::class.java.canonicalName}",
+            "${packageName}/${UiTreeService::class.java.canonicalName}"
+        )
+        val settingValue = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+
+        return services.all { settingValue.contains(it) }
     }
 
     // =========================================================
@@ -441,24 +513,60 @@ class MainActivity : AppCompatActivity() {
     private fun handleTaskStart(data: TaskStartMessage) {
         runOnUiThread {
             showResult("系統通知: 任務已開始。")
-            sendTaskStartNotification()  // 先發通知
-            moveTaskToBack(true)         // 再推到背景
+
+            // 直接彈 Dialog 讓使用者選擇
+            AlertDialog.Builder(this)
+                .setTitle("MobileMind 任務確認")
+                .setMessage("AI 已準備好執行任務，是否開始？")
+                .setCancelable(false)  // 不能點空白處關掉
+                .setPositiveButton("✅ 開始任務") { _, _ ->
+                    val currentTime = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                        java.util.Locale.getDefault()
+                    ).format(java.util.Date())
+                    val payload = UserConfirmPayload(
+                        userconfirm = true,
+                        sentTime = currentTime
+                    )
+                    webSocket?.send(Gson().toJson(payload))
+                    Log.d("TaskAction", "使用者確認開始任務")
+
+                    val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_HOME)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    startActivity(homeIntent)
+                }
+                .setNegativeButton("❌ 取消任務") { _, _ ->
+                    val currentTime = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                        java.util.Locale.getDefault()
+                    ).format(java.util.Date())
+                    val payload = UserConfirmPayload(
+                        userconfirm = false,
+                        sentTime = currentTime
+                    )
+                    webSocket?.send(Gson().toJson(payload))
+                    Log.d("TaskAction", "使用者取消任務")
+                }
+                .show()
         }
     }
 
     //  收到 read_ui 時的處置
     private fun handleReadUI(data: ReadUiMessage) {
         Log.d("DEBUG_FLOW", "=== handleReadUI 被呼叫了 ===")
+
         runOnUiThread {
             showResult("系統通知:AI正在遠端讀取螢幕結構與畫面...")
         }
 
         // 修正：用最安全、乾淨的方式指派 ACTION，完全避開類型推導錯誤（Cannot infer type）
         // 1. 通知 MediaProjectionService 截圖
-        val captureIntent = Intent(this, MediaProjectionService::class.java)
+        /*val captureIntent = Intent(this, MediaProjectionService::class.java)
         captureIntent.action = "ACTION_CAPTURE"
         startService(captureIntent)
-        Log.d("DEBUG_FLOW", "=== startService(ACTION_CAPTURE) 已發出 ===")
+        Log.d("DEBUG_FLOW", "=== startService(ACTION_CAPTURE) 已發出 ===")*/
 
         // 2. 通知 UiTreeService 更新 UI Tree
         val requestUiIntent = Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI")
@@ -570,12 +678,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleScreenCaptureResult(result: androidx.activity.result.ActivityResult) {
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val data: Intent? = result.data
-
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
             // 啟動 MediaProjectionService 前台服務
             val serviceIntent = Intent(this, MediaProjectionService::class.java).apply {
-                putExtra("data", data)
+                putExtra("RESULT_CODE", result.resultCode)
+                putExtra("RESULT_DATA", result.data)
             }
 
             // 根據 Android 版本安全啟動服務

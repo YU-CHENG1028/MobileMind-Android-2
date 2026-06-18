@@ -36,6 +36,7 @@ class UiTreeService : AccessibilityService() {
     // 收到請求 → 立刻抓 UI Tree → 廣播回 MainActivity
     private val uiRefreshReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            Log.d("DEBUG_FLOW", "=== uiRefreshReceiver 收到廣播 ===")
             if (intent?.action == "COM_MOBILEMIND_REQUEST_REFRESH_UI") {
                 val uiTree = getCurrentUiTree()
                 val json = com.google.gson.Gson().toJson(uiTree) ?: "{}"
@@ -45,11 +46,34 @@ class UiTreeService : AccessibilityService() {
                 Log.d("DEBUG_FLOW", "UI Tree 長度: ${json.length} 字元")
                 Log.d("DEBUG_FLOW", "UI Tree 前200字: ${json.take(200)}")
 
-                val resultIntent = Intent("COM_MOBILEMIND_UI_UPDATED")
+                /*val resultIntent = Intent("COM_MOBILEMIND_UI_UPDATED")
                 resultIntent.putExtra("UI_JSON", json)
                 sendBroadcast(resultIntent)
 
-                android.util.Log.d("UiTreeService", "UI Tree 已更新並廣播出去")
+                android.util.Log.d("UiTreeService", "UI Tree 已更新並廣播出去")*/
+                val ws = ConnectionHolder.webSocket
+                if (ws != null) {
+                    try {
+                        val currentTime = java.text.SimpleDateFormat(
+                            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                            java.util.Locale.getDefault()
+                        ).format(java.util.Date())
+
+                        val payload = UiScreenDataPayload(
+                            uiTree = json,
+                            screenShot = "",
+                            sentTime = currentTime
+                        )
+                        val jsonResponse = com.google.gson.Gson().toJson(payload)
+                        ws.send(jsonResponse)
+                        Log.d("DEBUG_FLOW", "✅ UiTreeService 直接發送成功！長度: ${jsonResponse.length}")
+                    } catch (e: Exception) {
+                        Log.e("DEBUG_FLOW", "❌ UiTreeService 發送失敗: ${e.message}")
+                    }
+                } else {
+                    Log.e("DEBUG_FLOW", "❌ ConnectionHolder.webSocket 是 null！")
+                }
+
             }
         }
     }

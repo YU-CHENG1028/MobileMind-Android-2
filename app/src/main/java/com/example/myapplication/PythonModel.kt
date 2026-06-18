@@ -72,6 +72,11 @@ data class DetailResponsePayload(
     @SerializedName("detail_response") val detailResponse: String, // 使用者回復之具體細節
     @SerializedName("sent_time") val sentTime: String
 )
+data class UserConfirmPayload(
+    @SerializedName("type") val type: String = "user_confirm_start",
+    @SerializedName("user_confirm") val userconfirm: Boolean, // 使用者回復之具體細節
+    @SerializedName("sent_time") val sentTime: String
+)
 
 // 2. 接收 UI 樹與畫面截圖回傳
 data class UiScreenDataPayload(

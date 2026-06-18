@@ -4,15 +4,15 @@
 
     <!--    網路通行證-->
     <uses-permission android:name="android.permission.INTERNET" />
-
     <!--    MediaProjection (螢幕擷取)-->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!--    存檔權限-->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 10+ 截圖存檔需要
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
+        tools:ignore="ScopedStorage" />-->
 
     <application
         android:allowBackup="true"
@@ -34,6 +34,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".TaskActionReceiver"
+            android:exported="false" />
 
         <!-- 負責執行動作的服務 -->
         <service

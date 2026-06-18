@@ -47,10 +47,6 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-    // 1. 加入 Retrofit 核心
-    //implementation("com.squareup.retrofit2:retrofit:2.9.0")
-    // 2. 加入 Gson 轉換器
-    //implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     //OkHttp 依賴
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     //引入 Google 的 JSON 處理庫

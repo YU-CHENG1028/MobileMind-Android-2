@@ -16,12 +16,14 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Environment
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
+import android.os.Handler
 
 class MediaProjectionService : Service() {
 
@@ -31,37 +33,65 @@ class MediaProjectionService : Service() {
     private var mProjection: MediaProjection? = null
     private var mVirtualDisplay: VirtualDisplay? = null
 
+    companion object {
+        // 用靜態變數保存 Service 自己的實例
+        var instance: MediaProjectionService? = null
+    }
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannel()
     }
+
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     @RequiresApi(Build.VERSION_CODES.Q)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 啟動前台通知（每次都要做）
         val notification = NotificationCompat.Builder(this, "CHANNEL_ID")
             .setContentTitle("螢幕擷取中")
             .setContentText("AI 正在使用全螢幕自動化視覺服務...")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .build()
+        // 🔑 Android 10+ 必須指定 foregroundServiceType
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                1,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(1, notification)
+        }
 
-        startForeground(1, notification)
-
-        mWidth = intent?.getIntExtra("WIDTH", 1080) ?: 1080
-        mHeight = intent?.getIntExtra("HEIGHT", 1920) ?: 1920
+        // 情況一：第一次啟動，帶有授權資料 → 初始化
         val resultCode = intent?.getIntExtra("RESULT_CODE", 0) ?: 0
         val resultData = intent?.getParcelableExtra<Intent>("RESULT_DATA")
 
         if (resultData != null && resultCode != 0) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mProjection = mpManager.getMediaProjection(resultCode, resultData)
+            mWidth = intent.getIntExtra("WIDTH", 1080)
+            mHeight = intent.getIntExtra("HEIGHT", 1920)
             setupVirtualDisplay()
+            Log.d("DEBUG_FLOW", "=== MediaProjection 初始化完成 ===")
         }
 
-        // 💡 修正點 1：將呼叫名稱改為 captureScreen()，對齊底下的宣告，消滅 Unresolved reference 紅字
+        // 情況二：收到截圖指令
         if (intent?.action == "ACTION_CAPTURE") {
-            captureScreen()
+            /*Log.d("DEBUG_FLOW", "=== 收到 ACTION_CAPTURE 指令 ===")
+            Log.d("DEBUG_FLOW", "=== mProjection: $mProjection, mImageReader: $mImageReader ===")
+
+            if (mProjection == null || mImageReader == null) {
+                Log.e("DEBUG_FLOW", "❌ 尚未初始化，無法截圖！")
+                return START_NOT_STICKY
+            }
+            // VirtualDisplay 需要一點時間穩定，加短暫延遲再截圖
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                captureScreen()
+            }, 300)*/
         }
 
         return START_NOT_STICKY
@@ -71,12 +101,25 @@ class MediaProjectionService : Service() {
     private fun setupVirtualDisplay() {
         mImageReader = ImageReader.newInstance(mWidth, mHeight, PixelFormat.RGBA_8888, 2)
 
+        // 🔑 Android 14+ 強制要求：先註冊 Callback，再建立 VirtualDisplay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // API 34
+            mProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    // MediaProjection 被系統停止時，釋放資源
+                    mVirtualDisplay?.release()
+                    mVirtualDisplay = null
+                    Log.d("MediaProjection", "MediaProjection 已停止")
+                }
+            }, Handler(Looper.getMainLooper()))
+        }
+
         mVirtualDisplay = mProjection?.createVirtualDisplay(
             "MobileMind-ScreenCapture",
             mWidth, mHeight, 320,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             mImageReader?.surface, null, null
         )
+        Log.d("DEBUG_FLOW", "=== VirtualDisplay 建立完成 ===")
     }
 
     private fun createNotificationChannel() {
@@ -92,7 +135,16 @@ class MediaProjectionService : Service() {
     }
 
     private fun captureScreen() {
+        Log.d("DEBUG_FLOW", "=== captureScreen 被呼叫 ===")
         val image = mImageReader?.acquireLatestImage() ?: return
+        Log.d("DEBUG_FLOW", "=== acquireLatestImage 結果: ${image} ===")
+        if (image == null) {
+            Log.e(
+                "DEBUG_FLOW",
+                "❌ image 是 null！mImageReader=${mImageReader}, mProjection=${mProjection}"
+            )
+            return
+        }
         val planes = image.planes
         val buffer = planes[0].buffer
 
@@ -131,7 +183,7 @@ class MediaProjectionService : Service() {
     }
 
     private fun bitmapToBase64(bitmap: Bitmap): String {
-        val maxSide = 720
+        val maxSide = 480
         val scale = maxSide.toFloat() / Math.max(bitmap.width, bitmap.height).toFloat()
         val resizedBitmap = if (scale < 1.0) {
             Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
@@ -140,7 +192,7 @@ class MediaProjectionService : Service() {
         }
 
         val outputStream = ByteArrayOutputStream()
-        resizedBitmap.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
+        resizedBitmap.compress(Bitmap.CompressFormat.JPEG, 30, outputStream)
         val byteArray = outputStream.toByteArray()
 
         // 如果點陣圖有縮放，記得把縮放後的臨時 Bitmap 也回收掉
