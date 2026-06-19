@@ -29,6 +29,7 @@ import android.widget.Toast
 import androidx.appcompat.resources.Compatibility.Api18Impl.setAutoCancel
 import androidx.core.content.ContextCompat.getSystemService
 import androidx.core.content.ContextCompat.startForegroundService
+import com.example.myapplication.ActionResult
 import com.example.myapplication.databinding.ActivityMainBinding
 //Data Parsing
 import com.google.gson.Gson
@@ -256,19 +257,15 @@ class MainActivity : AppCompatActivity() {
                             handleReadUI(Gson().fromJson(text, ReadUiMessage::class.java))
                         }
 
-                        "action_check" -> handleActionCheck(
-                            Gson().fromJson(
-                                text,
-                                ActionCheckMessage::class.java
-                            )
-                        )
+                        "action_check" -> {
+                            Log.d("DEBUG_FLOW", "=== 收到 action_check 訊息 ===")
+                            handleActionCheck(Gson().fromJson(text, ActionCheckMessage::class.java))
+                        }
 
-                        "operate_command" -> handleOperateCommand(
-                            Gson().fromJson(
-                                text,
-                                OperateCommandMessage::class.java
-                            )
-                        )
+                        "operate_command" -> {
+                            Log.d("DEBUG_FLOW", "=== 收到 operate_command 訊息 ===")
+                            handleOperateCommand(Gson().fromJson(text, OperateCommandMessage::class.java))
+                        }
 
                         "task_end" -> handleTaskEnd(
                             Gson().fromJson(
@@ -589,8 +586,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleOperateCommand(data: OperateCommandMessage) {
-        val actionStr = data.currentAction
-        runOnUiThread { showResult("AI 執行指令: $actionStr") }
+        val action = data.currentAction
+        runOnUiThread { showResult("AI 執行指令: ${action.actionType}") }
+
+        val service = MyAccessibilityService.instance
+        if (service == null) {
+            Log.e("WebSocket", "MyAccessibilityService 尚未連接，無法執行操作")
+            return
+        }
+
+        service.runAction(action) { result ->
+            when (result) {
+                is ActionResult.Success ->
+                    Log.d("ActionExec", "操作成功: ${action.actionType}")
+                is ActionResult.Failure ->
+                    Log.w("ActionExec", "操作失敗: ${result.reason}")
+            }
+            // 目前沒有截圖能力，操作完成後重新讀取 UI Tree，
+            // 重用 UiTreeService 既有的廣播流程，會自動透過 ConnectionHolder 送回後端
+            sendBroadcast(Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI"))
+        }
     }
 
     private fun handleTaskEnd(data: TaskEndMessage) {

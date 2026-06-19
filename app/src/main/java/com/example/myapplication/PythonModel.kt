@@ -1,5 +1,6 @@
 package com.example.myapplication // 請更換為你專案實際的 package 名稱
 
+import androidx.core.app.NotificationCompat
 import com.google.gson.annotations.SerializedName
 
 /**
@@ -48,7 +49,7 @@ data class ActionCheckMessage(
 // 6. 發送操作指令給 APP (用途：發送操作指令)
 data class OperateCommandMessage(
     @SerializedName("type") val type: String = "operate_command",
-    @SerializedName("current_action") val currentAction: String, // 操作指令（亦可改為自訂的 Action Object）
+    @SerializedName("current_action") val currentAction: Action, // 操作指令（亦可改為自訂的 Action Object）
     @SerializedName("sent_time") val sentTime: String
 )
 
