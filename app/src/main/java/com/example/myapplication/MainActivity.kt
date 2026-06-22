@@ -604,7 +604,12 @@ class MainActivity : AppCompatActivity() {
             }
             // 目前沒有截圖能力，操作完成後重新讀取 UI Tree，
             // 重用 UiTreeService 既有的廣播流程，會自動透過 ConnectionHolder 送回後端
-            sendBroadcast(Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI"))
+            // 動作可能跳出本 APP（例如點開另一個 APP），畫面需要時間載入，
+            // 延遲 3 秒讓新畫面穩定後，再重新讀取 UI Tree 回傳給後端
+            Handler(Looper.getMainLooper()).postDelayed({
+                Log.d("DEBUG_FLOW", "=== 已等待 3 秒，重新讀取 UI Tree 並回傳後端 ===")
+                sendBroadcast(Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI"))
+            }, 3000L)
         }
     }
 
