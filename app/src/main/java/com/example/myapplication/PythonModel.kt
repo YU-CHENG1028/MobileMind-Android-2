@@ -41,7 +41,7 @@ data class ReadUiMessage(
 // 5. 通知使用者敏感操作需要確認 (用途：通知使用者需確認)
 data class ActionCheckMessage(
     @SerializedName("type") val type: String = "action_check",
-    @SerializedName("action_detail") val actionDetail: String, // 紐西(元件、類型、輸入內容)
+    @SerializedName("action_detail") val actionDetail: String, // (元件、類型、輸入內容)
     @SerializedName("sensitive_reason") val sensitiveReason: String, // 為敏感操作的原因
     @SerializedName("sent_time") val sentTime: String
 )

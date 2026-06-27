@@ -2,7 +2,6 @@ package com.example.myapplication
 //宣告此 Kotlin 類別所屬的套件（Package），Android 專案通常以反向網域名稱命名。
 
 //**通訊與系統服務(System Services & Intent)**
-
 import android.R.attr.action
 import android.content.Context.INPUT_METHOD_SERVICE
 import android.content.Intent
@@ -197,6 +196,7 @@ class MainActivity : AppCompatActivity() {
         val request = Request.Builder()
             //Ngrok 隨機網址，且路由結尾為 /ws
             .url("wss://unannealed-controllingly-sarai.ngrok-free.dev/ws")
+            //.url("wss://violate-eggbeater-overstuff.ngrok-free.dev/ws")
             //注入 Header 繞過 Ngrok 免費版的 200 OK 網頁攔截，確保 101 握手成功
             .addHeader("ngrok-skip-browser-warning", "true")
             .build()
@@ -582,7 +582,50 @@ class MainActivity : AppCompatActivity() {
     private fun handleActionCheck(data: ActionCheckMessage) {
         val detail = data.actionDetail
         val reason = data.sensitiveReason
-        runOnUiThread { showResult("敏感操作確認: $detail (原因: $reason)") }
+
+        runOnUiThread {
+            showResult("⚠️ 敏感操作確認: $detail (原因: $reason)")
+
+            AlertDialog.Builder(this)
+                .setTitle("⚠️ 敏感操作確認")
+                .setMessage("即將執行：$detail\n\n原因：$reason")
+                .setCancelable(false)  // 不能點空白處關掉，強制使用者明確選擇
+                .setPositiveButton("✅ 確認執行") { _, _ ->
+                    sendSensitiveConfirm(true)
+                }
+                .setNegativeButton("❌ 取消任務") { _, _ ->
+                    sendSensitiveConfirm(false)
+                }
+                .show()
+        }
+    }
+
+    private fun sendSensitiveConfirm(confirmed: Boolean) {
+        val ws = webSocket ?: ConnectionHolder.webSocket
+        if (ws == null) {
+            Log.e("WebSocket", "WebSocket 是 null，無法送出敏感操作確認")
+            return
+        }
+
+        try {
+            val currentTime = java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                java.util.Locale.getDefault()
+            ).format(java.util.Date())
+
+            val payload = SensitiveConfirmPayload(
+                requestResponse = confirmed,
+                sentTime = currentTime
+            )
+            ws.send(Gson().toJson(payload))
+
+            Log.d("WebSocket", "已送出敏感操作確認: $confirmed")
+            runOnUiThread {
+                showResult(if (confirmed) "您已確認執行該操作" else "您已取消該操作")
+            }
+        } catch (e: Exception) {
+            Log.e("WebSocket", "送出敏感操作確認失敗: ${e.message}")
+        }
     }
 
     private fun handleOperateCommand(data: OperateCommandMessage) {

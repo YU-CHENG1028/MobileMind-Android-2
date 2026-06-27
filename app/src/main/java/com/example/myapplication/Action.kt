@@ -13,39 +13,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 // ─────────────────────────────────────────────
-// 與後端對應的資料類別（對應 Python Pydantic Model）
-// ─────────────────────────────────────────────
-
-data class BoundsXY(
-    val x: Int,
-    val y: Int
-)
-
-data class Action(
-    @SerializedName("action_type")          // "click" / "set_text" / "scroll" / "global_back"
-    val actionType: String,
-    @SerializedName("resource_id")          // 優先使用
-    val resourceId: String?,
-    @SerializedName("content_description")  // 新增
-    val contentDescription: String?,
-    val bounds: BoundsXY?,                          // resource_id 不存在時的 fallback
-    @SerializedName("input_text")           // 僅 set_text 時使用
-    val inputText: String?,
-    @SerializedName("scroll_direction")     // 僅 scroll 時使用："up"/"down"/"left"/"right"
-    val scrollDirection: String?
-)
-
-// ─────────────────────────────────────────────
-// 執行結果封裝
-// ─────────────────────────────────────────────
-
-sealed class ActionResult {
-    object Success : ActionResult()
-    data class Failure(val reason: String) : ActionResult()
-}
-
-// ─────────────────────────────────────────────
 // 主執行器
+// Action / BoundsXY / ActionResult 定義在 ActionModels.kt
 // ─────────────────────────────────────────────
 
 class ActionExecutor(private val service: AccessibilityService) {
@@ -121,15 +90,29 @@ class ActionExecutor(private val service: AccessibilityService) {
         val node = findTargetNode(action)
             ?: return ActionResult.Failure("set_text 找不到目標節點")
 
+        // 1. 先 click 再 focus —— 很多自訂輸入框只用 ACTION_FOCUS 抓不到真正的輸入焦點
         // 先 focus，再設定文字
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        val args = Bundle().apply {
+
+        // 2. 嘗試標準的 ACTION_SET_TEXT
+        val setTextArgs = Bundle().apply {
             putString(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        val result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)) {
+            node.recycle()
+            return ActionResult.Success
+        }
+        Log.w(TAG, "ACTION_SET_TEXT 失敗，fallback 到剪貼簿貼上: ${action.resourceId}")
+
+        // 3. fallback：剪貼簿貼上 —— WebView / 自訂搜尋框常常只接受 ACTION_PASTE
+        val clipboard = service.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("mobilemind_input", text))
+        val pasted = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         node.recycle()
 
-        return if (result) ActionResult.Success
+        return if (pasted) ActionResult.Success
         else ActionResult.Failure("ACTION_SET_TEXT 執行失敗，目標: ${action.resourceId ?: action.bounds}")
     }
 
@@ -247,6 +230,32 @@ class ActionExecutor(private val service: AccessibilityService) {
     /**
      * 依 resource_id 優先、bounds_x 次之找到目標節點
      */
+
+    /** 跨所有目前顯示的視窗（包含彈出的建議清單）找節點 */
+    private fun findNodeAcrossWindows(matcher: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        val windows = service.windows ?: return null
+        for (window in windows) {
+            val root = window.root ?: continue
+            val found = searchNodeRecursive(root, matcher)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun searchNodeRecursive(
+        node: AccessibilityNodeInfo,
+        matcher: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        if (matcher(node)) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = searchNodeRecursive(child, matcher)
+            if (found != null) return found
+            child.recycle()
+        }
+        return null
+    }
+
     private fun findTargetNode(action: Action): AccessibilityNodeInfo? {
         //第一優先：resource_id
         if (!action.resourceId.isNullOrBlank()) {
@@ -270,23 +279,29 @@ class ActionExecutor(private val service: AccessibilityService) {
      * resource_id 可能包含完整套件名（com.example:id/btn_search）或只有 id 部分
      */
     private fun findNodeByResourceId(resourceId: String): AccessibilityNodeInfo? {
-        val root = service.rootInActiveWindow ?: return null
-        // findAccessibilityNodeInfosByViewId 需要完整格式，例如 "com.example:id/button"
-        val nodes = root.findAccessibilityNodeInfosByViewId(resourceId)
-        root.recycle()
-        return nodes?.firstOrNull()
+        val root = service.rootInActiveWindow
+        if (root != null) {
+            val nodes = root.findAccessibilityNodeInfosByViewId(resourceId)
+            root.recycle()
+            nodes?.firstOrNull()?.let { return it }
+        }
+        // rootInActiveWindow 找不到時，可能是彈出的建議清單視窗，跨視窗找
+        return findNodeAcrossWindows { it.viewIdResourceName == resourceId }
     }
+
 
     /*搜尋 resource_id*/
     private fun findNodeByDescription(description: String): AccessibilityNodeInfo? {
-        val root = service.rootInActiveWindow ?: return null
-        // findAccessibilityNodeInfosByText 會比對 text 和 contentDescription，是模糊匹配
-        val nodes = root.findAccessibilityNodeInfosByText(description)
-        root.recycle()
-        // 精確比對 contentDescription，避免模糊匹配到錯誤節點
-        return nodes?.firstOrNull {
-            it.contentDescription?.toString() == description ||
-                    it.text?.toString() == description
+        val root = service.rootInActiveWindow
+        if (root != null) {
+            val nodes = root.findAccessibilityNodeInfosByText(description)
+            root.recycle()
+            nodes?.firstOrNull {
+                it.contentDescription?.toString() == description || it.text?.toString() == description
+            }?.let { return it }
+        }
+        return findNodeAcrossWindows {
+            it.contentDescription?.toString() == description || it.text?.toString() == description
         }
     }
 
