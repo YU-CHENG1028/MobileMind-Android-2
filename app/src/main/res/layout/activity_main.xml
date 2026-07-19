@@ -82,7 +82,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="你媽的BB"
+                android:text="您今天需要我幫忙什麼呢"
                 android:textColor="#49454F"
                 android:textSize="16sp" />
         </LinearLayout>

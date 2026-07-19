@@ -198,6 +198,9 @@ class UiTreeService : AccessibilityService() {
                     node.viewIdResourceName
                 ),
 
+            fullResourceId =
+                node.viewIdResourceName,
+
             type =
                 simplifyClassName(
                     node.className
@@ -271,6 +274,7 @@ data class UiNode(
     val contentDescription: String? = null,
     val hint: String? = null,
     val resourceId: String? = null,
+    val fullResourceId: String? = null,
     val type: String,
     val clickable: Boolean,
     val enabled: Boolean,

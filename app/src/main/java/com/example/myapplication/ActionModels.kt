@@ -9,8 +9,11 @@ import com.google.gson.annotations.SerializedName
 
 data class Action(
     @SerializedName("action_type") val actionType: String,
+    @SerializedName("full_resource_id") val fullResourceId: String? = null,
     @SerializedName("resource_id") val resourceId: String? = null,
     @SerializedName("content_description") val contentDescription: String? = null,
+    @SerializedName("hint") val hintText: String? = null,
+    @SerializedName("text") val text: String? = null,
     @SerializedName("bounds") val bounds: BoundsXY? = null,
     @SerializedName("input_text") val inputText: String? = null,
     @SerializedName("scroll_direction") val scrollDirection: String? = null
