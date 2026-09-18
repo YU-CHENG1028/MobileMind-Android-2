@@ -46,41 +46,22 @@ class UiTreeService : AccessibilityService() {
                 Log.d("DEBUG_FLOW", "UI Tree 長度: ${json.length} 字元")
                 Log.d("DEBUG_FLOW", "UI Tree 前200字: ${json.take(200)}")
 
-                /*val resultIntent = Intent("COM_MOBILEMIND_UI_UPDATED")
+                val resultIntent = Intent("COM_MOBILEMIND_UI_UPDATED")
                 resultIntent.putExtra("UI_JSON", json)
                 sendBroadcast(resultIntent)
-
-                android.util.Log.d("UiTreeService", "UI Tree 已更新並廣播出去")*/
-                val ws = ConnectionHolder.webSocket
-                if (ws != null) {
-                    try {
-                        val currentTime = java.text.SimpleDateFormat(
-                            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-                            java.util.Locale.getDefault()
-                        ).format(java.util.Date())
-
-                        val payload = UiScreenDataPayload(
-                            uiTree = json,
-                            screenShot = "",
-                            sentTime = currentTime
-                        )
-                        val jsonResponse = com.google.gson.Gson().toJson(payload)
-                        ws.send(jsonResponse)
-                        Log.d("DEBUG_FLOW", "✅ UiTreeService 直接發送成功！長度: ${jsonResponse.length}")
-                    } catch (e: Exception) {
-                        Log.e("DEBUG_FLOW", "❌ UiTreeService 發送失敗: ${e.message}")
-                    }
-                } else {
-                    Log.e("DEBUG_FLOW", "❌ ConnectionHolder.webSocket 是 null！")
-                }
-
+                android.util.Log.d("UiTreeService", "UI Tree 已更新並廣播出去")
             }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(uiRefreshReceiver)  // 防記憶體洩漏
+        try {
+            unregisterReceiver(uiRefreshReceiver)  // 防記憶體洩漏
+        } catch (e: IllegalArgumentException) {
+            Log.w("MainActivity", "Receiver 未註冊: ${e.message}")
+        }
+
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
