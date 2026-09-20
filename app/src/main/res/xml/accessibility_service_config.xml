@@ -5,4 +5,5 @@
     android:canRetrieveWindowContent="true"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
     android:description="@string/accessibility_description" />

@@ -62,7 +62,7 @@ class ActionExecutor(private val service: AccessibilityService) {
 
         // content_description 次之
         if (!action.contentDescription.isNullOrBlank()) {
-            val node = findNodeByDescription(action.contentDescription)
+            val node = findNodeByContentDescription(action.contentDescription)
             if (node != null) {
                 val result = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 node.recycle()
@@ -90,19 +90,32 @@ class ActionExecutor(private val service: AccessibilityService) {
         val node = findTargetNode(action)
             ?: return ActionResult.Failure("set_text 找不到目標節點")
 
+        Log.d(TAG, "class=${node.className}")
+        Log.d(TAG, "id=${node.viewIdResourceName}")
+        Log.d(TAG, "text=${node.text}")
+        //下面那行版本須為Android 8.0 (API Level 26)
+        //Log.d(TAG, "hint=${node.hintText}")
+        Log.d(TAG, "editable=${node.isEditable}")
+
         // 1. 先 click 再 focus —— 很多自訂輸入框只用 ACTION_FOCUS 抓不到真正的輸入焦點
         // 先 focus，再設定文字
         node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        Thread.sleep(200)
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        Thread.sleep(100)
 
         // 2. 嘗試標準的 ACTION_SET_TEXT
         val setTextArgs = Bundle().apply {
             putString(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)) {
+        Thread.sleep(200)
+        val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)
+        Log.d(TAG, "ACTION_SET_TEXT=$success")
+        if (success) {
             node.recycle()
             return ActionResult.Success
         }
+
         Log.w(TAG, "ACTION_SET_TEXT 失敗，fallback 到剪貼簿貼上: ${action.resourceId}")
 
         // 3. fallback：剪貼簿貼上 —— WebView / 自訂搜尋框常常只接受 ACTION_PASTE
@@ -257,51 +270,116 @@ class ActionExecutor(private val service: AccessibilityService) {
     }
 
     private fun findTargetNode(action: Action): AccessibilityNodeInfo? {
+        action.fullResourceId?.let {
+            findNodeByFullResourceId(it)?.let { return it }
+        }
+
+        action.resourceId?.let {
+            findNodeByResourceId(it)?.let { return it }
+        }
+
+        action.contentDescription?.let {
+            findNodeByContentDescription(it)?.let { return it }
+        }
+        /**
+        action.hintText?.let {
+            findNodeByHint(it)?.let { return it }
+        }
+        **/
+        action.text?.let {
+            findNodeByText(it)?.let { return it }
+        }
+
+        action.bounds?.let {
+            findNodeByBounds(it)?.let { return it }
+        }
+
+        return null
+        /*
         //第一優先：resource_id
         if (!action.resourceId.isNullOrBlank()) {
             val node = findNodeByResourceId(action.resourceId)
             if (node != null) return node
             Log.w(TAG, "resource_id 找不到節點: ${action.resourceId}")
         }
-
-        //第二優先：resource_id
+        //第二優先：contentDescription
         if (!action.contentDescription.isNullOrBlank()) {
             val node = findNodeByDescription(action.contentDescription)
             if (node != null) return node
             Log.w(TAG, "content_description 找不到節點: ${action.contentDescription}")
         }
+        //第三優先：hintText
+        if (!action.contentDescription.isNullOrBlank()) {
+            val node = findnode
+        }
         // bounds_x 的座標不能直接轉成節點，回傳 null 讓呼叫方 fallback 手勢
         return null
+
+        */
     }
 
+    //用完整ResourceId尋找
+    private fun findNodeByFullResourceId(fullId: String): AccessibilityNodeInfo? {
+        val root = service.rootInActiveWindow
+
+        if (root != null) {
+            val nodes = root.findAccessibilityNodeInfosByViewId(fullId)
+            if (!nodes.isNullOrEmpty()) {
+                return nodes.first()
+            }
+        }
+        return findNodeAcrossWindows {
+            it.viewIdResourceName == fullId
+        }
+    }
     /**
      * 從目前可見的視圖樹搜尋 resource_id
      * resource_id 可能包含完整套件名（com.example:id/btn_search）或只有 id 部分
      */
     private fun findNodeByResourceId(resourceId: String): AccessibilityNodeInfo? {
-        val root = service.rootInActiveWindow
-        if (root != null) {
-            val nodes = root.findAccessibilityNodeInfosByViewId(resourceId)
-            root.recycle()
-            nodes?.firstOrNull()?.let { return it }
+        return findNodeAcrossWindows {
+            val id = it.viewIdResourceName ?: return@findNodeAcrossWindows false
+
+            id.endsWith("/$resourceId")
         }
-        // rootInActiveWindow 找不到時，可能是彈出的建議清單視窗，跨視窗找
-        return findNodeAcrossWindows { it.viewIdResourceName == resourceId }
     }
 
 
-    /*搜尋 resource_id*/
-    private fun findNodeByDescription(description: String): AccessibilityNodeInfo? {
-        val root = service.rootInActiveWindow
-        if (root != null) {
-            val nodes = root.findAccessibilityNodeInfosByText(description)
-            root.recycle()
-            nodes?.firstOrNull {
-                it.contentDescription?.toString() == description || it.text?.toString() == description
-            }?.let { return it }
-        }
+    /*搜尋 Description*/
+    private fun findNodeByContentDescription(description: String): AccessibilityNodeInfo? {
         return findNodeAcrossWindows {
-            it.contentDescription?.toString() == description || it.text?.toString() == description
+            it.contentDescription?.toString() == description
+        }
+    }
+
+    /*搜尋 hint*/
+    /**
+    Android (API26)以上才能用
+    private fun findNodeByHint(hint: String): AccessibilityNodeInfo? {
+        return findNodeAcrossWindows {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODE.O) {
+                it.hintText?.toString() == hint
+            } else {
+                false
+            }
+        }
+
+    }
+     **/
+
+    /*搜尋 text*/
+    private fun findNodeByText(hint: String): AccessibilityNodeInfo? {
+        return findNodeAcrossWindows {
+            it.text?.toString() == hint
+        }
+    }
+
+    /*搜尋 bounds*/
+    private fun findNodeByBounds(bounds: BoundsXY): AccessibilityNodeInfo? {
+        return findNodeAcrossWindows {
+            val rect = Rect()
+            it.getBoundsInScreen(rect)
+            rect.centerX() == bounds.x && rect.centerY() == bounds.y
         }
     }
 

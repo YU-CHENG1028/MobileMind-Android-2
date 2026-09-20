@@ -10,6 +10,11 @@ import kotlinx.coroutines.launch
 import com.example.myapplication.ActionExecutor
 import com.example.myapplication.ActionResult
 import com.example.myapplication.Action
+import android.graphics.Bitmap
+import android.os.Build
+import android.view.Display
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
 
 /**
  * 負責「執行」後端操作指令的無障礙服務。
@@ -67,5 +72,41 @@ class MyAccessibilityService : AccessibilityService() {
             }
             onResult(result)
         }
+    }
+
+    // 使用accessibility內建的螢幕截圖功能
+    fun takeScreenShot(onResult: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.e("Accessibility", "takeScreenshot 需要 Android 11 (API 30) 以上")
+            onResult(null)
+            return
+        }
+
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    val bitmap = Bitmap.wrapHardwareBuffer(
+                        screenshot.hardwareBuffer,
+                        screenshot.colorSpace
+                    )
+
+                    screenshot.hardwareBuffer.close()
+
+                    onResult(bitmap)
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    Log.e(
+                        "Accessibility",
+                        "螢幕截圖失敗，errorCode=$errorCode"
+                    )
+
+                    onResult(null)
+                }
+            }
+        )
     }
 }

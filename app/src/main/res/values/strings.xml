@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">My Application</string>
+    <string name="app_name">Mobile Mind</string>
     <string name="accessibility_description">這是 MobileMind 的自動化輔助服務，用於優化 UI 操作與回饋。</string>
 </resources>

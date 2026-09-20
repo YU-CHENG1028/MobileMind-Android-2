@@ -3,6 +3,8 @@ package com.example.myapplication
 
 //**通訊與系統服務(System Services & Intent)**
 import android.R.attr.action
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Context.INPUT_METHOD_SERVICE
 import android.content.Intent
 import android.content.IntentFilter
@@ -36,6 +38,12 @@ import org.json.JSONObject
 //OkHttp / WebSocket
 import okhttp3.*
 import kotlin.jvm.java
+import android.graphics.Bitmap
+import android.util.Base64
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 
 //import okhttp3.Response
 //import okhttp3.WebSocket
@@ -54,55 +62,46 @@ class MainActivity : AppCompatActivity() {
     //OkHttpClient(factory)
     private val client = OkHttpClient()
 
-    // MediaProjection
-    private lateinit var mediaProjectionManager: MediaProjectionManager
-
-    // screenCaptureLauncher(handleScreenCaptureResult)
-    private val screenCaptureLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-        ::handleScreenCaptureResult
-    )
-
     // UiTreeJson(String)
     private var lastReceivedUiJson: String = "{}"
 
     //ScreenShot->Base64(String)
     private var latestScreenshotBase64: String = ""
-
-
-    // 2. 螢幕截圖廣播接收器
-    private val screenshotReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-            if (intent?.action == "COM_MOBILEMIND_SCREENSHOT_READY") {
-                val base64 = intent.getStringExtra("REAL_SCREENSHOT_BASE64")
-
-                // ✅ Log 2: 確認截圖廣播有收到
-                Log.d("DEBUG_FLOW", "=== 截圖廣播已收到 ===")
-                Log.d("DEBUG_FLOW", "Base64 是否為空: ${base64.isNullOrEmpty()}")
-                Log.d("DEBUG_FLOW", "Base64 長度: ${base64?.length ?: 0} 字元")
-
-                if (!base64.isNullOrEmpty()) {
-                    latestScreenshotBase64 = base64
-                    sendUiScreenData()
-                }
-            }
-        }
-    }
+    // read_ui 同步控制
+    private var isWaitingForUiTree = false
+    private var isWaitingForScreenshot = false
 
     // 3. UI 更新廣播接收器
-    private val uiUpdateReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+    private val uiUpdateReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(
+            context: Context?,
+            intent: Intent?
+        ) {
+
             if (intent?.action == "COM_MOBILEMIND_UI_UPDATED") {
+
                 val json = intent.getStringExtra("UI_JSON")
 
-                // ✅ Log 3: 確認 UI Tree 廣播有收到
-                Log.d("DEBUG_FLOW", "=== UI Tree 廣播已收到 ===")
-                Log.d("DEBUG_FLOW", "UI JSON 是否為空: ${json.isNullOrEmpty()}")
-                Log.d("DEBUG_FLOW", "UI JSON 長度: ${json?.length ?: 0} 字元")
+                Log.d(
+                    "DEBUG_FLOW",
+                    "=== UI Tree 廣播已收到 ==="
+                )
+
+                Log.d(
+                    "DEBUG_FLOW",
+                    "UI JSON 長度: ${json?.length ?: 0}"
+                )
 
                 if (!json.isNullOrEmpty()) {
+
                     lastReceivedUiJson = json
-                    sendUiTreeOnly()
+
+                    // UI Tree 已經準備好了
+                    isWaitingForUiTree = false
+
+                    // 檢查 Screenshot 是否也好了
+                    trySendUiScreenData()
                 }
             }
         }
@@ -123,9 +122,6 @@ class MainActivity : AppCompatActivity() {
         //初始化發送按鈕點擊
         setupClickListeners()
 
-        // 初始化 Manager
-        mediaProjectionManager =
-            getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
         if (!isAccessibilityServiceEnabled()) {
             AlertDialog.Builder(this)
@@ -159,16 +155,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         Log.d("DEBUG_FLOW", "=== UiTreeService instance: ${UiTreeService.instance} ===")
-    }// onCreate 結束
-
-    override fun onStart() {
-        super.onStart()
-        androidx.core.content.ContextCompat.registerReceiver(
-            this,
-            screenshotReceiver,
-            IntentFilter("COM_MOBILEMIND_SCREENSHOT_READY"),
-            androidx.core.content.ContextCompat.RECEIVER_EXPORTED
-        )
 
         androidx.core.content.ContextCompat.registerReceiver(
             this,
@@ -176,13 +162,19 @@ class MainActivity : AppCompatActivity() {
             IntentFilter("COM_MOBILEMIND_UI_UPDATED"),
             androidx.core.content.ContextCompat.RECEIVER_EXPORTED
         )
+    }// onCreate 結束
+
+    override fun onStart() {
+        super.onStart()
     }
 
     override fun onStop() {
         super.onStop()
-        // 解除註冊廣播接收器，防記憶體流失
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
         try {
-            unregisterReceiver(screenshotReceiver)
             unregisterReceiver(uiUpdateReceiver)
         } catch (e: IllegalArgumentException) {
             Log.w("MainActivity", "Receiver 未註冊: ${e.message}")
@@ -216,9 +208,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         webSocket.send(initMsg.toString())
                         Log.d("WebSocket", "已成功發送訊號，啟動後端 Agent")
-                        // 連線建立的瞬間，立刻在主執行緒發動螢幕截圖授權視窗
-                        val captureIntent = mediaProjectionManager.createScreenCaptureIntent()
-                        screenCaptureLauncher.launch(captureIntent)
+
                         Log.d("MobileMind", "連線成功，已主動要求螢幕截圖權限")
                     } catch (e: Exception) {
                         Log.e("WebSocket", "發送初始訊息失敗: ${e.message}")
@@ -293,94 +283,81 @@ class MainActivity : AppCompatActivity() {
         client.newWebSocket(request, listener)
     }
 
-    // 只送 UiTree 給後端（截圖功能先停用）
-    /*private fun sendUiTreeOnly() {
-        webSocket?.let { ws ->
-            try {
-                val currentTime = java.text.SimpleDateFormat(
-                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-                    java.util.Locale.getDefault()
-                ).format(java.util.Date())
+    private fun trySendUiScreenData() {
 
-                val payload = UiScreenDataPayload(
-                    uiTree = lastReceivedUiJson,
-                    screenShot = "",   // 截圖暫時留空
-                    sentTime = currentTime
-                )
+        Log.d(
+            "DEBUG_FLOW",
+            "檢查資料是否完整：" +
+                    "UI Tree 等待=$isWaitingForUiTree, " +
+                    "Screenshot 等待=$isWaitingForScreenshot"
+        )
 
-                val jsonResponse = Gson().toJson(payload)
-                ws.send(jsonResponse)
+        if (!isWaitingForUiTree && !isWaitingForScreenshot) {
 
-                Log.d("DEBUG_FLOW", "✅ 已發送 UI Tree（無截圖）！總長度: ${jsonResponse.length} 字元")
-            } catch (e: Exception) {
-                Log.e("DEBUG_FLOW", "❌ sendUiTreeOnly 失敗: ${e.message}")
-            }
-        } ?: Log.e("DEBUG_FLOW", "❌ WebSocket 是 null，無法發送！")
-    }*/
-
-    private fun sendUiTreeOnly() {
-        // ✅ 優先用 ConnectionHolder，MainActivity 在背景時仍有效
-        val ws = webSocket ?: ConnectionHolder.webSocket
-
-        ws?.let { activeWs ->
-            try {
-                val currentTime = java.text.SimpleDateFormat(
-                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-                    java.util.Locale.getDefault()
-                ).format(java.util.Date())
-
-                val payload = UiScreenDataPayload(
-                    uiTree = lastReceivedUiJson,
-                    screenShot = "",
-                    sentTime = currentTime
-                )
-
-                val jsonResponse = Gson().toJson(payload)
-                activeWs.send(jsonResponse)
-
-                Log.d("DEBUG_FLOW", "✅ 已發送 UI Tree！總長度: ${jsonResponse.length} 字元")
-            } catch (e: Exception) {
-                Log.e("DEBUG_FLOW", "❌ sendUiTreeOnly 失敗: ${e.message}")
-            }
-        } ?: Log.e("DEBUG_FLOW", "❌ WebSocket 是 null（含 ConnectionHolder），無法發送！")
+            Log.d(
+                "DEBUG_FLOW",
+                "✅ UI Tree + Screenshot 都準備完成，開始送給後端"
+            )
+            sendUiScreenData()
+        }
     }
 
     // 5.  核心傳送函式（確保獨立放在 class 內，不要嵌套在其他函式裡）
     private fun sendUiScreenData() {
-        webSocket?.let { ws ->
-            try {
-                // ✅ Log 4: 確認發送前兩份資料的狀態
-                Log.d("DEBUG_FLOW", "=== 準備發送給後端 ===")
-                Log.d("DEBUG_FLOW", "lastReceivedUiJson 長度: ${lastReceivedUiJson.length}")
-                Log.d("DEBUG_FLOW", "latestScreenshotBase64 長度: ${latestScreenshotBase64.length}")
 
-                if (lastReceivedUiJson == "{}") {
-                    Log.w("DEBUG_FLOW", " 警告: UI Tree 是空的，可能尚未更新！")
-                }
-                if (latestScreenshotBase64.isEmpty()) {
-                    Log.w("DEBUG_FLOW", " 警告: 截圖是空的！")
-                }
+        val ws =
+            webSocket ?: ConnectionHolder.webSocket
 
-                val currentTime = java.text.SimpleDateFormat(
+        if (ws == null) {
+            Log.e(
+                "WebSocket",
+                "❌ WebSocket 是 null，無法發送"
+            )
+            return
+        }
+
+        try {
+            Log.d(
+                "DEBUG_FLOW",
+                "=== 準備發送 UI Tree + Screenshot ==="
+            )
+            Log.d(
+                "DEBUG_FLOW",
+                "UI Tree 長度: ${lastReceivedUiJson.length}"
+            )
+            Log.d(
+                "DEBUG_FLOW",
+                "Screenshot Base64 長度: ${latestScreenshotBase64.length}"
+            )
+            val currentTime =
+                java.text.SimpleDateFormat(
                     "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
                     java.util.Locale.getDefault()
                 ).format(java.util.Date())
 
-                val payload = UiScreenDataPayload(
+            val payload =
+                UiScreenDataPayload(
                     uiTree = lastReceivedUiJson,
                     screenShot = latestScreenshotBase64,
                     sentTime = currentTime
                 )
 
-                val jsonResponse = Gson().toJson(payload)
-                ws.send(jsonResponse)
+            val jsonResponse =
+                Gson().toJson(payload)
 
-                // ✅ Log 5: 確認有成功送出
-                Log.d("DEBUG_FLOW", "✅ 已成功發送給後端！總長度: ${jsonResponse.length} 字元")
-            } catch (e: Exception) {
-                Log.e("DEBUG_FLOW", "❌ sendUiScreenData 失敗: ${e.message}")
-            }
-        }?: Log.e("DEBUG_FLOW", "❌ WebSocket 是 null，無法發送！")
+            ws.send(jsonResponse)
+            Log.d(
+                "DEBUG_FLOW",
+                "✅ UI Tree + Screenshot 已成功發送！" +
+                        "總長度: ${jsonResponse.length}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                "DEBUG_FLOW",
+                "❌ sendUiScreenData 失敗: ${e.message}",
+                e
+            )
+        }
     }
 
     private fun sendTaskStartNotification() {
@@ -428,6 +405,58 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID, notification)
+    }
+
+    // 敏感操作確認通知：無論使用者目前在桌面還是其他 App，都能從畫面上方看到並直接按按鈕回應，
+    // 不需要切回本 App。做法跟 sendTaskStartNotification() 一致，只是換一組 action / 通知 ID。
+    private fun sendActionCheckNotification(detail: String, reason: String) {
+        val channelId = "mobilemind_task_channel"
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE)
+                as android.app.NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                channelId,
+                "MobileMind 任務通知",
+                android.app.NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "顯示 AI 任務執行狀態" }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // 建立「確認執行」PendingIntent
+        val confirmIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_SENSITIVE_CONFIRM
+        }
+        val confirmPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 3, confirmIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 建立「取消任務」PendingIntent
+        val cancelIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_SENSITIVE_CANCEL
+        }
+        val cancelPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 4, cancelIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("⚠️ 敏感操作確認")
+            .setContentText("即將執行：$detail")
+            .setStyle(
+                androidx.core.app.NotificationCompat.BigTextStyle()
+                    .bigText("即將執行：$detail\n\n原因：$reason")
+            )
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM) // 提高被系統視為緊急、彈出橫幅的機率
+            .setAutoCancel(true)
+            .addAction(R.drawable.ic_launcher_foreground, "✅ 確認執行", confirmPendingIntent)
+            .addAction(R.drawable.ic_launcher_foreground, "❌ 取消任務", cancelPendingIntent)
+            .build()
+
+        notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID_SENSITIVE, notification)
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -557,26 +586,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             showResult("系統通知:AI正在遠端讀取螢幕結構與畫面...")
         }
-
-        // 修正：用最安全、乾淨的方式指派 ACTION，完全避開類型推導錯誤（Cannot infer type）
-        // 1. 通知 MediaProjectionService 截圖
-        /*val captureIntent = Intent(this, MediaProjectionService::class.java)
-        captureIntent.action = "ACTION_CAPTURE"
-        startService(captureIntent)
-        Log.d("DEBUG_FLOW", "=== startService(ACTION_CAPTURE) 已發出 ===")*/
-
-        // 2. 通知 UiTreeService 更新 UI Tree
-        val requestUiIntent = Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI")
-        sendBroadcast(requestUiIntent)
-        Log.d("DEBUG_FLOW", "=== sendBroadcast(REQUEST_REFRESH_UI) 已發出 ===")
-
-        Log.d("WebSocket", "收到 read_ui 指令，已同時觸發截圖與 UI Tree 更新")
-
-        // 3. 等待兩個廣播都回來後，再統一發送給後端
-        //    截圖廣播(screenshotReceiver)收到後會自動呼叫 sendUiScreenData()
-        //    UI Tree 廣播(uiUpdateReceiver)收到後會更新 lastReceivedUiJson
-        //    用 500ms 延遲確保 lastReceivedUiJson 先被更新，截圖廣播再觸發發送
-
+        captureUiAndScreen()
     }
 
     private fun handleActionCheck(data: ActionCheckMessage) {
@@ -585,19 +595,12 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             showResult("⚠️ 敏感操作確認: $detail (原因: $reason)")
-
-            AlertDialog.Builder(this)
-                .setTitle("⚠️ 敏感操作確認")
-                .setMessage("即將執行：$detail\n\n原因：$reason")
-                .setCancelable(false)  // 不能點空白處關掉，強制使用者明確選擇
-                .setPositiveButton("✅ 確認執行") { _, _ ->
-                    sendSensitiveConfirm(true)
-                }
-                .setNegativeButton("❌ 取消任務") { _, _ ->
-                    sendSensitiveConfirm(false)
-                }
-                .show()
         }
+
+        // 改用通知（而非 AlertDialog），這樣不管使用者當下在桌面還是其他 App，
+        // 都會從畫面上方跳出橫幅，並可直接在通知上按「確認執行 / 取消任務」，
+        // 不需要切回本 App 才看得到。
+        sendActionCheckNotification(detail, reason)
     }
 
     private fun sendSensitiveConfirm(confirmed: Boolean) {
@@ -639,19 +642,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         service.runAction(action) { result ->
+            // ========================================
+            // 1. 顯示 Action 執行結果
+            // ========================================
             when (result) {
                 is ActionResult.Success ->
                     Log.d("ActionExec", "操作成功: ${action.actionType}")
                 is ActionResult.Failure ->
                     Log.w("ActionExec", "操作失敗: ${result.reason}")
             }
-            // 目前沒有截圖能力，操作完成後重新讀取 UI Tree，
-            // 重用 UiTreeService 既有的廣播流程，會自動透過 ConnectionHolder 送回後端
+            // 2.等待畫面穩定
             // 動作可能跳出本 APP（例如點開另一個 APP），畫面需要時間載入，
             // 延遲 3 秒讓新畫面穩定後，再重新讀取 UI Tree 回傳給後端
             Handler(Looper.getMainLooper()).postDelayed({
-                Log.d("DEBUG_FLOW", "=== 已等待 3 秒，重新讀取 UI Tree 並回傳後端 ===")
-                sendBroadcast(Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI"))
+                Log.d("DEBUG_FLOW", "=== 已等待 3 秒，重新取得 UI Tree + Screenshot ===")
+                captureUiAndScreen()
             }, 3000L)
         }
     }
@@ -740,24 +745,125 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleScreenCaptureResult(result: androidx.activity.result.ActivityResult) {
-        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
-            // 啟動 MediaProjectionService 前台服務
-            val serviceIntent = Intent(this, MediaProjectionService::class.java).apply {
-                putExtra("RESULT_CODE", result.resultCode)
-                putExtra("RESULT_DATA", result.data)
-            }
+    private fun bitmapToBase64(bitmap: Bitmap): String {
+        /*  註解掉的是將截圖壓縮尺寸的邏輯
+        val maxSide = 480
 
-            // 根據 Android 版本安全啟動服務
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
+        val scale =
+            maxSide.toFloat() /
+                    maxOf(bitmap.width, bitmap.height).toFloat()
+        val resizedBitmap =
+            if (scale < 1.0f) {
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    (bitmap.width * scale).toInt(),
+                    (bitmap.height * scale).toInt(),
+                    true
+                )
             } else {
-                startService(serviceIntent)
+                bitmap
             }
-            Log.d("MobileMind", "螢幕截圖授權成功，前台服務已啟動！")
-        } else {
-            Log.w("MobileMind", "使用者拒絕了螢幕截圖授權")
+        */
+        //目前使用螢幕原始尺寸
+        val outputStream = ByteArrayOutputStream()
+        bitmap.compress(
+            Bitmap.CompressFormat.JPEG,
+            70,
+            outputStream
+        )
+        /*
+        resizedBitmap.compress(
+            Bitmap.CompressFormat.JPEG,
+            70,
+            outputStream
+        )
+
+        if (resizedBitmap !== bitmap) {
+            resizedBitmap.recycle()
         }
+        */
+        return Base64.encodeToString(
+            outputStream.toByteArray(),
+            Base64.NO_WRAP
+        )
+    }
+
+    //將截圖與擷取UI Tree功能抽出成一個函式
+    private fun captureUiAndScreen() {
+        // ========================================
+        // 1. 開始新的讀取
+        // ========================================
+
+        isWaitingForUiTree = true
+        isWaitingForScreenshot = true
+
+        // 清掉上一張截圖
+        latestScreenshotBase64 = ""
+        // 拿掉MediaProjecttion截圖功能，使用takescreenshot
+        // 1. 請 AccessibilityService 擷取目前螢幕
+        val accessibilityService = MyAccessibilityService.instance
+
+        if (accessibilityService == null) {
+            Log.e(
+                "DEBUG_FLOW",
+                "❌ MyAccessibilityService 尚未連接，無法截圖"
+            )
+            isWaitingForScreenshot = false
+            trySendUiScreenData()
+        } else {
+            accessibilityService.takeScreenShot { bitmap ->
+                if (bitmap == null) {
+                    Log.e(
+                        "DEBUG_FLOW",
+                        "❌ AccessibilityService 截圖失敗"
+                    )
+                    isWaitingForScreenshot = false
+
+                    trySendUiScreenData()
+                    return@takeScreenShot
+                }
+
+                Log.d(
+                    "DEBUG_FLOW",
+                    "✅ 螢幕截圖成功：${bitmap.width} x ${bitmap.height}"
+                )
+
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        val base64 = bitmapToBase64(bitmap)
+                        bitmap.recycle()
+                        latestScreenshotBase64 = base64
+
+                        Log.d(
+                            "DEBUG_FLOW",
+                            "✅ Screenshot Base64 長度：${base64.length}"
+                        )
+                        // Screenshot 已經完成
+                        isWaitingForScreenshot = false
+
+                        // 檢查 UI Tree 是否也完成
+                        trySendUiScreenData()
+
+                    } catch (e: Exception) {
+
+                        Log.e(
+                            "DEBUG_FLOW",
+                            "❌ 截圖處理失敗：${e.message}",
+                            e
+                        )
+                        isWaitingForScreenshot = false
+                        trySendUiScreenData()
+                    }
+                }
+            }
+        }
+        // 2. 同時要求 UiTreeService 更新 UI Tree
+        val requestUiIntent = Intent("COM_MOBILEMIND_REQUEST_REFRESH_UI")
+        sendBroadcast(requestUiIntent)
+        Log.d(
+            "DEBUG_FLOW",
+            "=== 已要求 UiTreeService 更新 UI Tree ==="
+        )
     }
 } //MainActivity over
 
