@@ -407,6 +407,58 @@ class MainActivity : AppCompatActivity() {
         notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID, notification)
     }
 
+    // 敏感操作確認通知：無論使用者目前在桌面還是其他 App，都能從畫面上方看到並直接按按鈕回應，
+    // 不需要切回本 App。做法跟 sendTaskStartNotification() 一致，只是換一組 action / 通知 ID。
+    private fun sendActionCheckNotification(detail: String, reason: String) {
+        val channelId = "mobilemind_task_channel"
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE)
+                as android.app.NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                channelId,
+                "MobileMind 任務通知",
+                android.app.NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "顯示 AI 任務執行狀態" }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // 建立「確認執行」PendingIntent
+        val confirmIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_SENSITIVE_CONFIRM
+        }
+        val confirmPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 3, confirmIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 建立「取消任務」PendingIntent
+        val cancelIntent = Intent(this, TaskActionReceiver::class.java).apply {
+            action = TaskActionReceiver.ACTION_SENSITIVE_CANCEL
+        }
+        val cancelPendingIntent = android.app.PendingIntent.getBroadcast(
+            this, 4, cancelIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("⚠️ 敏感操作確認")
+            .setContentText("即將執行：$detail")
+            .setStyle(
+                androidx.core.app.NotificationCompat.BigTextStyle()
+                    .bigText("即將執行：$detail\n\n原因：$reason")
+            )
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM) // 提高被系統視為緊急、彈出橫幅的機率
+            .setAutoCancel(true)
+            .addAction(R.drawable.ic_launcher_foreground, "✅ 確認執行", confirmPendingIntent)
+            .addAction(R.drawable.ic_launcher_foreground, "❌ 取消任務", cancelPendingIntent)
+            .build()
+
+        notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID_SENSITIVE, notification)
+    }
+
     private fun isAccessibilityServiceEnabled(): Boolean {
         val services = listOf(
             "${packageName}/${MyAccessibilityService::class.java.canonicalName}",
@@ -543,19 +595,12 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             showResult("⚠️ 敏感操作確認: $detail (原因: $reason)")
-
-            AlertDialog.Builder(this)
-                .setTitle("⚠️ 敏感操作確認")
-                .setMessage("即將執行：$detail\n\n原因：$reason")
-                .setCancelable(false)  // 不能點空白處關掉，強制使用者明確選擇
-                .setPositiveButton("✅ 確認執行") { _, _ ->
-                    sendSensitiveConfirm(true)
-                }
-                .setNegativeButton("❌ 取消任務") { _, _ ->
-                    sendSensitiveConfirm(false)
-                }
-                .show()
         }
+
+        // 改用通知（而非 AlertDialog），這樣不管使用者當下在桌面還是其他 App，
+        // 都會從畫面上方跳出橫幅，並可直接在通知上按「確認執行 / 取消任務」，
+        // 不需要切回本 App 才看得到。
+        sendActionCheckNotification(detail, reason)
     }
 
     private fun sendSensitiveConfirm(confirmed: Boolean) {
