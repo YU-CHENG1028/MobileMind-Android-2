@@ -337,7 +337,10 @@ class MainActivity : AppCompatActivity() {
 
             val payload =
                 UiScreenDataPayload(
-                    uiTree = lastReceivedUiJson,
+                    // lastReceivedUiJson 是 UiTreeService 那邊已經轉好的 JSON 字串，
+                    // 這裡要先 parse 回 JsonElement，才能讓 Gson 把它當成巢狀物件序列化，
+                    // 而不是被當成單純字串再包一層雙重編碼
+                    uiTree = com.google.gson.JsonParser.parseString(lastReceivedUiJson),
                     screenShot = latestScreenshotBase64,
                     sentTime = currentTime
                 )
@@ -444,10 +447,10 @@ class MainActivity : AppCompatActivity() {
         val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("⚠️ 敏感操作確認")
-            .setContentText("即將執行：$detail")
+            .setContentText("$detail")
             .setStyle(
                 androidx.core.app.NotificationCompat.BigTextStyle()
-                    .bigText("即將執行：$detail\n\n原因：$reason")
+                    .bigText("$detail\n\n原因：$reason")
             )
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
             .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM) // 提高被系統視為緊急、彈出橫幅的機率
@@ -746,42 +749,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bitmapToBase64(bitmap: Bitmap): String {
-        /*  註解掉的是將截圖壓縮尺寸的邏輯
-        val maxSide = 480
+        // 視覺模型（Claude）接收圖片時，內部會把長邊 resize 到約 1568px 才實際餵給模型，
+        // 超過這個尺寸的細節模型本來就看不到，只會浪費 Base64 傳輸量與 WebSocket 延遲，
+        // 所以在裝置端就先 resize 到這個上限，等於免費省頻寬、不損失模型看得到的資訊。
+        val maxSide = 1568
 
+        val longSide = maxOf(bitmap.width, bitmap.height)
         val scale =
-            maxSide.toFloat() /
-                    maxOf(bitmap.width, bitmap.height).toFloat()
+            if (longSide > maxSide) maxSide.toFloat() / longSide.toFloat() else 1.0f
+
         val resizedBitmap =
             if (scale < 1.0f) {
                 Bitmap.createScaledBitmap(
                     bitmap,
                     (bitmap.width * scale).toInt(),
                     (bitmap.height * scale).toInt(),
-                    true
+                    true // bilinear filter，縮放後文字/圖示邊緣比較不會鋸齒
                 )
             } else {
                 bitmap
             }
-        */
-        //目前使用螢幕原始尺寸
+        
         val outputStream = ByteArrayOutputStream()
-        bitmap.compress(
-            Bitmap.CompressFormat.JPEG,
-            70,
-            outputStream
-        )
-        /*
+        
+        // 改用 PNG（無損）取代先前的 JPEG quality=70。
+        // UI 截圖是大面積純色 + 銳利文字/圖示邊緣，JPEG 的區塊壓縮容易在這類內容上
+        // 產生 artifact，直接影響「bounds fallback 點擊定位」與「前後截圖比對是否成功」
+        // 這兩個環節的判斷精準度。PNG 對這種畫面壓縮率也不會差，換上是划算的。
+        // （這裡填的第二個參數對 PNG 無效，PNG 一律無損，填 100 只是語意清楚。）
         resizedBitmap.compress(
-            Bitmap.CompressFormat.JPEG,
-            70,
+            Bitmap.CompressFormat.PNG,
+            100,
             outputStream
         )
 
         if (resizedBitmap !== bitmap) {
             resizedBitmap.recycle()
         }
-        */
+        
         return Base64.encodeToString(
             outputStream.toByteArray(),
             Base64.NO_WRAP

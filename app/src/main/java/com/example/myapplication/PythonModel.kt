@@ -1,6 +1,7 @@
 package com.example.myapplication // 請更換為你專案實際的 package 名稱
 
 import androidx.core.app.NotificationCompat
+import com.google.gson.JsonElement
 import com.google.gson.annotations.SerializedName
 
 /**
@@ -82,7 +83,7 @@ data class UserConfirmPayload(
 // 2. 接收 UI 樹與畫面截圖回傳
 data class UiScreenDataPayload(
     @SerializedName("type") val type: String = "ui_screen_data",
-    @SerializedName("ui_tree") val uiTree: String, // UI 樹結構 (對應表格中的 dictory，前端可以傳轉好的 JSON 字串)
+    @SerializedName("ui_tree") val uiTree: JsonElement, // UI 樹結構 (對應表格中的 dictory，前端可以傳轉好的 JSON 字串)
     @SerializedName("screen_shot") val screenShot: String, // 螢幕截圖 Base64
     @SerializedName("sent_time") val sentTime: String
 )
