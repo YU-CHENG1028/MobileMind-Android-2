@@ -26,6 +26,9 @@ class ActionExecutor(private val service: AccessibilityService) {
         private const val SCROLL_DISTANCE_PX = 500
         // scroll 動畫時長（毫秒）
         private const val SCROLL_DURATION_MS = 300L
+
+        // findNodeByBounds 的容許誤差（像素）：座標落在節點邊界外多少 px 內仍算命中
+        private const val BOUNDS_TOLERANCE_PX = 24
     }
 
     /**
@@ -86,25 +89,35 @@ class ActionExecutor(private val service: AccessibilityService) {
         val text = action.inputText
             ?: return ActionResult.Failure("set_text 操作缺少 input_text")
 
-        // 先找到節點（resource_id 優先）
-        val node = findTargetNode(action)
-            ?: return ActionResult.Failure("set_text 找不到目標節點")
+        // 1. 優先用「目前有輸入焦點」的節點（鍵盤正在對著它輸入，最準確）
+        //    只有在 isEditable == true 時才採用，避免拿到非輸入框的節點
+        var node: AccessibilityNodeInfo? = findFocusedEditableNode()
+        val alreadyFocused = node != null
 
-        Log.d(TAG, "class=${node.className}")
-        Log.d(TAG, "id=${node.viewIdResourceName}")
-        Log.d(TAG, "text=${node.text}")
-        //下面那行版本須為Android 8.0 (API Level 26)
-        //Log.d(TAG, "hint=${node.hintText}")
-        Log.d(TAG, "editable=${node.isEditable}")
+        // 2. 沒有焦點節點時，依 action 提供的線索找，但「只接受可編輯的節點」
+        if (node == null) {
+            node = findEditableTargetNode(action)
+        }
 
-        // 1. 先 click 再 focus —— 很多自訂輸入框只用 ACTION_FOCUS 抓不到真正的輸入焦點
-        // 先 focus，再設定文字
-        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        Thread.sleep(200)
-        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        Thread.sleep(100)
+        if (node == null) {
+            return ActionResult.Failure(
+                "set_text 找不到可編輯(isEditable=true)的輸入框，" +
+                        "目標: ${action.resourceId ?: action.contentDescription ?: action.text ?: action.bounds}"
+            )
+        }
 
-        // 2. 嘗試標準的 ACTION_SET_TEXT
+        Log.d(TAG, "set_text 目標 class=${node.className} id=${node.viewIdResourceName} " +
+                "text=${node.text} editable=${node.isEditable} alreadyFocused=$alreadyFocused")
+
+        // 3. 沒有焦點才需要 click + focus 取得輸入焦點；已經有焦點就不要再點一次
+        if (!alreadyFocused) {
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            Thread.sleep(200)
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            Thread.sleep(100)
+        }
+
+        // 4. 標準 ACTION_SET_TEXT
         val setTextArgs = Bundle().apply {
             putString(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -118,7 +131,7 @@ class ActionExecutor(private val service: AccessibilityService) {
 
         Log.w(TAG, "ACTION_SET_TEXT 失敗，fallback 到剪貼簿貼上: ${action.resourceId}")
 
-        // 3. fallback：剪貼簿貼上 —— WebView / 自訂搜尋框常常只接受 ACTION_PASTE
+        // 5. fallback：剪貼簿貼上（此時 node 一定是可編輯節點，不會再貼到錯的地方）
         val clipboard = service.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                 as android.content.ClipboardManager
         clipboard.setPrimaryClip(android.content.ClipData.newPlainText("mobilemind_input", text))
@@ -126,7 +139,7 @@ class ActionExecutor(private val service: AccessibilityService) {
         node.recycle()
 
         return if (pasted) ActionResult.Success
-        else ActionResult.Failure("ACTION_SET_TEXT 執行失敗，目標: ${action.resourceId ?: action.bounds}")
+        else ActionResult.Failure("ACTION_SET_TEXT 與 PASTE 都失敗，目標: ${action.resourceId ?: action.bounds}")
     }
 
     // ─────────────────────────────────────────
@@ -269,6 +282,65 @@ class ActionExecutor(private val service: AccessibilityService) {
         return null
     }
 
+    /** 目前擁有「輸入焦點」且可編輯的節點；找不到回傳 null。只有 set_text 會呼叫。 */
+    private fun findFocusedEditableNode(): AccessibilityNodeInfo? {
+        val windows = service.windows
+        if (windows != null) {
+            for (window in windows) {
+                val root = window.root ?: continue
+                val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (focused != null && focused.isEditable) return focused
+                focused?.recycle()
+            }
+        }
+        // 保險：有些情況 windows 拿不到，退回只查目前作用中的視窗
+        val focused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (focused != null && focused.isEditable) return focused
+        focused?.recycle()
+        return null
+    }
+
+    /** 依 action 的線索找節點，但每一種線索都要求 isEditable == true */
+    private fun findEditableTargetNode(action: Action): AccessibilityNodeInfo? {
+        action.fullResourceId?.takeIf { it.isNotBlank() }?.let { id ->
+            findNodeAcrossWindows { it.isEditable && it.viewIdResourceName == id }?.let { return it }
+        }
+        action.resourceId?.takeIf { it.isNotBlank() }?.let { id ->
+            findNodeAcrossWindows {
+                it.isEditable && (it.viewIdResourceName?.endsWith("/$id") == true)
+            }?.let { return it }
+        }
+        action.contentDescription?.takeIf { it.isNotBlank() }?.let { d ->
+            findNodeAcrossWindows { it.isEditable && it.contentDescription?.toString() == d }
+                ?.let { return it }
+        }
+        // 空輸入框的 text 常常回傳 hint，所以 text 也拿來比對
+        listOfNotNull(action.text, action.hintText).filter { it.isNotBlank() }.forEach { t ->
+            findNodeAcrossWindows { it.isEditable && it.text?.toString() == t }?.let { return it }
+        }
+        action.bounds?.let { b ->
+            findNodeByBounds(b, requireEditable = true)?.let { return it }
+        }
+        // 最後手段：整個畫面只有一個可編輯節點時，就是它
+        val editables = mutableListOf<AccessibilityNodeInfo>()
+        service.windows?.forEach { w ->
+            w.root?.let { collectEditable(it, editables) }
+        }
+        return if (editables.size == 1) editables[0] else {
+            editables.forEach { it.recycle() }
+            null
+        }
+    }
+
+    private fun collectEditable(node: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
+        if (node.isEditable && node.isVisibleToUser) out.add(AccessibilityNodeInfo.obtain(node))
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectEditable(child, out)
+            child.recycle()
+        }
+    }
+
     private fun findTargetNode(action: Action): AccessibilityNodeInfo? {
         action.fullResourceId?.let {
             findNodeByFullResourceId(it)?.let { return it }
@@ -374,13 +446,57 @@ class ActionExecutor(private val service: AccessibilityService) {
         }
     }
 
-    /*搜尋 bounds*/
-    private fun findNodeByBounds(bounds: BoundsXY): AccessibilityNodeInfo? {
-        return findNodeAcrossWindows {
+    /*搜尋 bounds：容許誤差版
+     * 原本要求節點中心點與 LLM 給的座標「完全相等」，LLM 從截圖估出來的座標
+     * 幾乎不可能剛好吻合，所以改成：
+     *   1. 節點的 bounds 往外擴 BOUNDS_TOLERANCE_PX 之後，只要包含這個座標就算候選
+     *   2. 候選中挑「面積最小」的（最貼近目標、最具體的那個元件，而不是外層大容器）
+     *   3. 面積一樣時挑中心點離座標最近的
+     * 沒被選中的候選節點會 recycle 掉。
+     */
+    private fun findNodeByBounds(bounds: BoundsXY, requireEditable: Boolean = false): AccessibilityNodeInfo? {
+        val windows = service.windows ?: return null
+        val tol = BOUNDS_TOLERANCE_PX
+
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = Long.MAX_VALUE
+        var bestDist = Long.MAX_VALUE
+
+        fun visit(node: AccessibilityNodeInfo) {
             val rect = Rect()
-            it.getBoundsInScreen(rect)
-            rect.centerX() == bounds.x && rect.centerY() == bounds.y
+            node.getBoundsInScreen(rect)
+
+            val hit = rect.width() > 0 && rect.height() > 0 &&
+                    (!requireEditable || node.isEditable) &&
+                    bounds.x >= rect.left - tol && bounds.x <= rect.right + tol &&
+                    bounds.y >= rect.top - tol && bounds.y <= rect.bottom + tol
+
+            if (hit) {
+                val area = rect.width().toLong() * rect.height().toLong()
+                val dx = (rect.centerX() - bounds.x).toLong()
+                val dy = (rect.centerY() - bounds.y).toLong()
+                val dist = dx * dx + dy * dy
+
+                if (area < bestArea || (area == bestArea && dist < bestDist)) {
+                    best?.recycle()
+                    best = AccessibilityNodeInfo.obtain(node)
+                    bestArea = area
+                    bestDist = dist
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+                child.recycle()
+            }
         }
+
+        for (window in windows) {
+            val root = window.root ?: continue
+            visit(root)
+        }
+        return best
     }
 
     // ─────────────────────────────────────────

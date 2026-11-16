@@ -22,6 +22,9 @@ class TaskActionReceiver : BroadcastReceiver() {
         const val ACTION_SENSITIVE_CONFIRM = "COM_MOBILEMIND_SENSITIVE_CONFIRM"
         const val ACTION_SENSITIVE_CANCEL = "COM_MOBILEMIND_SENSITIVE_CANCEL"
         const val NOTIFICATION_ID_SENSITIVE = 1002
+
+        // 任務結束（task_end）結果通知，單純顯示結果、不帶按鈕
+        const val NOTIFICATION_ID_TASK_END = 1003
     }
 
     override fun onReceive(context: Context?, intent: Intent?) {

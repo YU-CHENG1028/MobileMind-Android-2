@@ -597,7 +597,7 @@ class MainActivity : AppCompatActivity() {
         val reason = data.sensitiveReason
 
         runOnUiThread {
-            showResult("⚠️ 敏感操作確認: $detail (原因: $reason)")
+            showResult("⚠️ 敏感操作確認: $detail 原因: $reason")
         }
 
         // 改用通知（而非 AlertDialog），這樣不管使用者當下在桌面還是其他 App，
@@ -667,12 +667,138 @@ class MainActivity : AppCompatActivity() {
     private fun handleTaskEnd(data: TaskEndMessage) {
         val result = data.taskResult
         val process = data.taskProcess
+        val errorReason = data.errorReason
+        val stats = parseTaskProcess(process)
+        val isSuccess = result.contains("成功") && !result.contains("失敗")
+
         runOnUiThread {
             val notificationManager = getSystemService(NOTIFICATION_SERVICE)
                     as android.app.NotificationManager
-            notificationManager.cancel(1001)  // 撤掉任務通知
-            showResult("🏁 任務結束！結果: $result (流程步數: $process)")
+            notificationManager.cancel(TaskActionReceiver.NOTIFICATION_ID)  // 撤掉任務開始通知
+            notificationManager.cancel(TaskActionReceiver.NOTIFICATION_ID_SENSITIVE) // 任務都結束了，敏感操作確認也不用留著
+
+            showTaskResult(result, isSuccess, stats, process, errorReason)
         }
+
+        // 跟 action_check 一樣用通知：任務多半是 AI 在別的 App 裡操作，
+        // 使用者不一定停在本 App，結束時要能從通知列看到結果
+        sendTaskEndNotification(result, isSuccess, stats, process, errorReason)
+    }
+
+    // 後端 task_process 是一段多行文字，例如：
+    //   任務總步數：6 / 成功執行的步數：6 / 失敗的次數：1
+    // 這裡把數字抓出來；抓不到的欄位為 null，畫面上會退回顯示原始文字
+    private data class TaskStats(val total: Int?, val success: Int?, val failed: Int?) {
+        val isParsed get() = total != null || success != null || failed != null
+    }
+
+    private fun parseTaskProcess(process: String): TaskStats {
+        fun find(label: String): Int? =
+            Regex("$label\\s*[：:]\\s*(\\d+)").find(process)?.groupValues?.get(1)?.toIntOrNull()
+
+        return TaskStats(
+            total = find("任務總步數"),
+            success = find("成功執行的步數"),
+            failed = find("失敗的次數")
+        )
+    }
+
+    // 顯示「任務結果」卡片（取代原本一整串文字）
+    private fun showTaskResult(
+        result: String,
+        isSuccess: Boolean,
+        stats: TaskStats,
+        rawProcess: String,
+        errorReason: String?
+    ) {
+        if (!stats.isParsed) {
+            // 格式不如預期時，退回一般文字顯示，避免資訊遺失
+            showResult("🏁 任務結束！結果: $result\n${rawProcess.trim()}")
+            return
+        }
+
+        val accent = android.graphics.Color.parseColor(if (isSuccess) "#2E7D32" else "#B3261E")
+
+        binding.cardAiResponse.visibility = android.view.View.GONE
+        binding.cardTaskResult.visibility = android.view.View.VISIBLE
+
+        binding.tvStatusBadge.text = if (isSuccess) "✓" else "!"
+        binding.tvStatusBadge.background.mutate().setTint(accent)
+        binding.tvResultTitle.text = if (isSuccess) "任務完成" else "任務失敗"
+        binding.tvResultSubtitle.text = result
+
+        binding.tvTotalSteps.text = (stats.total ?: "-").toString()
+        binding.tvSuccessSteps.text = (stats.success ?: "-").toString()
+        binding.tvFailedCount.text = (stats.failed ?: "-").toString()
+        // 有失敗次數時用紅色提醒
+        binding.tvFailedCount.setTextColor(
+            android.graphics.Color.parseColor(if ((stats.failed ?: 0) > 0) "#B3261E" else "#49454F")
+        )
+
+        if (!errorReason.isNullOrBlank()) {
+            binding.tvErrorReason.text = "失敗原因：$errorReason"
+            binding.tvErrorReason.visibility = android.view.View.VISIBLE
+        } else {
+            binding.tvErrorReason.visibility = android.view.View.GONE
+        }
+
+        binding.nestedScrollView.smoothScrollTo(0, 0)
+    }
+
+    // 任務結束通知：點通知會回到 MobileMind。跟 sendActionCheckNotification() 共用同一個 channel。
+    private fun sendTaskEndNotification(
+        result: String,
+        isSuccess: Boolean,
+        stats: TaskStats,
+        rawProcess: String,
+        errorReason: String?
+    ) {
+        val channelId = "mobilemind_task_channel"
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE)
+                as android.app.NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                channelId,
+                "MobileMind 任務通知",
+                android.app.NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "顯示 AI 任務執行狀態" }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // 點通知 → 回到 MobileMind（已開著就直接拉回前景，不重開）
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val openPendingIntent = android.app.PendingIntent.getActivity(
+            this, 5, openIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val summary = if (stats.isParsed) {
+            "共 ${stats.total ?: "-"} 步 ・ 成功 ${stats.success ?: "-"} 步 ・ 失敗 ${stats.failed ?: "-"} 次"
+        } else {
+            rawProcess.trim().replace("\n", " ")
+        }
+        val bigText = buildString {
+            append(result)
+            append("\n").append(summary)
+            if (!errorReason.isNullOrBlank()) append("\n失敗原因：").append(errorReason)
+        }
+
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(if (isSuccess) "✅ 任務完成" else "❌ 任務失敗")
+            .setContentText(summary)
+            .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_STATUS)
+            .setColor(android.graphics.Color.parseColor(if (isSuccess) "#2E7D32" else "#B3261E"))
+            .setContentIntent(openPendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(TaskActionReceiver.NOTIFICATION_ID_TASK_END, notification)
     }
 
     // =========================================================
@@ -737,7 +863,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun showResult(message: String) {
         runOnUiThread {
-            // 1. 將後端回傳的訊息設定給 XML 中的 TextView
+            // 1. 將後端回傳的訊息設定給 XML 中的 TextView（並切回一般訊息卡片、收起任務結果卡片）
+            binding.cardTaskResult.visibility = android.view.View.GONE
+            binding.cardAiResponse.visibility = android.view.View.VISIBLE
             binding.tvAiResponse.text = message
 
             // 2. (選配) 如果你希望每次有新回覆時能自動滾動到最上方
@@ -749,44 +877,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bitmapToBase64(bitmap: Bitmap): String {
-        // 視覺模型（Claude）接收圖片時，內部會把長邊 resize 到約 1568px 才實際餵給模型，
-        // 超過這個尺寸的細節模型本來就看不到，只會浪費 Base64 傳輸量與 WebSocket 延遲，
-        // 所以在裝置端就先 resize 到這個上限，等於免費省頻寬、不損失模型看得到的資訊。
-        val maxSide = 1568
-
-        val longSide = maxOf(bitmap.width, bitmap.height)
-        val scale =
-            if (longSide > maxSide) maxSide.toFloat() / longSide.toFloat() else 1.0f
-
-        val resizedBitmap =
-            if (scale < 1.0f) {
-                Bitmap.createScaledBitmap(
-                    bitmap,
-                    (bitmap.width * scale).toInt(),
-                    (bitmap.height * scale).toInt(),
-                    true // bilinear filter，縮放後文字/圖示邊緣比較不會鋸齒
-                )
-            } else {
-                bitmap
-            }
-        
+        // 不縮放：送出的截圖維持手機原始解析度（PNG 無損）。
+        // 這樣截圖上的像素座標 = UI Tree 的座標 = 點擊手勢用的座標，三者永遠一致，
+        // LLM 憑截圖估出來的 bounds 不需要再換算縮放比例。
+        // 若之後網路傳輸變成瓶頸，再考慮縮放，但要同步把縮放比例回傳給後端還原座標。
         val outputStream = ByteArrayOutputStream()
-        
-        // 改用 PNG（無損）取代先前的 JPEG quality=70。
-        // UI 截圖是大面積純色 + 銳利文字/圖示邊緣，JPEG 的區塊壓縮容易在這類內容上
-        // 產生 artifact，直接影響「bounds fallback 點擊定位」與「前後截圖比對是否成功」
-        // 這兩個環節的判斷精準度。PNG 對這種畫面壓縮率也不會差，換上是划算的。
-        // （這裡填的第二個參數對 PNG 無效，PNG 一律無損，填 100 只是語意清楚。）
-        resizedBitmap.compress(
+        bitmap.compress(
             Bitmap.CompressFormat.PNG,
-            100,
+            100, // PNG 為無損格式，此參數無效
             outputStream
         )
 
-        if (resizedBitmap !== bitmap) {
-            resizedBitmap.recycle()
-        }
-        
         return Base64.encodeToString(
             outputStream.toByteArray(),
             Base64.NO_WRAP
